@@ -181,15 +181,49 @@ function useImageUrl(source: { url: string } | { loadImage: LoadImage }, image: 
  * plus `alignSelf: flex-start` stop flex parents from stretching the frame past
  * the image (the bug in the first live build).
  */
+const FRAME_PAD = 8
 const IMAGE_FRAME: CSSProperties = {
   display: 'block',
   width: 'fit-content',
   maxWidth: '100%',
   alignSelf: 'flex-start',
-  borderRadius: 6,
-  overflow: 'hidden',
+  padding: FRAME_PAD,
+  borderRadius: 8,
   boxShadow: '0 0 0 1px color-mix(in srgb, currentColor 14%, transparent)',
-  boxSizing: 'border-box',
+  boxSizing: 'content-box',
+}
+
+/**
+ * Median colour of an image's one-pixel border ring, as a CSS colour, or
+ * 'transparent' when the ring is (mostly) transparent. Fills the frame's padding
+ * so the plate matches the raster instead of the rounded corners clipping into it.
+ */
+function borderMedianColor(img: HTMLImageElement): string | undefined {
+  const w = img.naturalWidth, h = img.naturalHeight
+  if (w === 0 || h === 0) return undefined
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = w; canvas.height = h
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (ctx === null) return undefined
+    ctx.drawImage(img, 0, 0)
+    const rows = [ctx.getImageData(0, 0, w, 1).data, ctx.getImageData(0, h - 1, w, 1).data, ctx.getImageData(0, 0, 1, h).data, ctx.getImageData(w - 1, 0, 1, h).data]
+    const ch: number[][] = [[], [], [], []]
+    for (const data of rows) for (let i = 0; i < data.length; i += 4) for (let c = 0; c < 4; c++) (ch[c] as number[]).push(data[i + c] as number)
+    const median = (a: number[]) => { const b = [...a].sort((x, y) => x - y); return b[Math.floor(b.length / 2)] ?? 0 }
+    const [r, g, b, a] = ch.map(median) as [number, number, number, number]
+    if (a < 128) return 'transparent'
+    return `rgb(${r} ${g} ${b})`
+  } catch {
+    return undefined // tainted canvas or decode failure: leave the frame unfilled
+  }
+}
+
+/** Frame background derived from the loaded image; recomputed whenever the src changes. */
+function useFrameColor(): { color: string | undefined, onLoad: (event: { currentTarget: HTMLImageElement }) => void } {
+  const [color, setColor] = useState<string | undefined>(undefined)
+  const onLoad = useCallback((event: { currentTarget: HTMLImageElement }) => { setColor(borderMedianColor(event.currentTarget)) }, [])
+  return { color, onLoad }
 }
 
 /** Reveal a plugin-written PNG in the system viewer through the host's open route (paths under showDirectory only). */
@@ -220,11 +254,12 @@ function ShowCaption({ label, path }: { label: string, path: string | undefined 
 function WolframImage({ source, image, pointWidth, alt, path }: { source: { url: string } | { loadImage: LoadImage }, image: ImageRef, pointWidth: number | undefined, alt: string, path: string | undefined }) {
   const { url, failed } = useImageUrl(source, image)
   const [broken, setBroken] = useState(false)
+  const frame = useFrameColor()
   const width = pointWidth ?? image.width
   if (failed || broken) return <div style={{ opacity: 0.7, fontSize: 12 }}>[image unavailable{path ? `: ${path}` : ''}]</div>
   if (url === undefined) return <div style={{ ...IMAGE_FRAME, width, aspectRatio: `${image.width} / ${image.height}`, opacity: 0.4 }} />
   return (
-    <div style={IMAGE_FRAME}>
+    <div style={{ ...IMAGE_FRAME, background: frame.color ?? 'transparent' }}>
       <img
         src={url}
         alt={alt}
@@ -232,6 +267,7 @@ function WolframImage({ source, image, pointWidth, alt, path }: { source: { url:
         style={{ display: 'block', width, maxWidth: '100%', height: 'auto', cursor: 'zoom-in' }}
         onClick={() => { window.open(url, '_blank', 'noopener') }}
         onError={() => setBroken(true)}
+        onLoad={frame.onLoad}
         title={path ?? alt}
       />
     </div>
@@ -284,6 +320,7 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
   const [dead, setDead] = useState<string | undefined>(undefined)
   const [problem, setProblem] = useState<string | undefined>(undefined)
   const [opening, setOpening] = useState(false)
+  const frame = useFrameColor()
   const [lastTiming, setLastTiming] = useState<ShowTiming | undefined>(timing)
   const [size, setSize] = useState<{ w: number, h: number }>({ w: image.width / scale, h: image.height / scale })
   const inflight = useRef(false)
@@ -422,8 +459,8 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
           )
         })}
       </div>
-      <div style={{ ...IMAGE_FRAME, opacity: busy && !live ? 0.75 : 1, transition: 'opacity 120ms' }}>
-        <img src={src} alt={alt} title={alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} />
+      <div style={{ ...IMAGE_FRAME, background: frame.color ?? 'transparent', opacity: busy && !live ? 0.75 : 1, transition: 'opacity 120ms' }}>
+        <img src={src} alt={alt} title={alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} onLoad={frame.onLoad} />
       </div>
       <StatusRow timing={lastTiming} live={live} onOpen={dead === undefined ? () => { void openCurrent() } : undefined} opening={opening} />
       {problem !== undefined && <pre style={{ ...PRE_STYLE, fontSize: 11, opacity: 0.8 }}>{problem}</pre>}
