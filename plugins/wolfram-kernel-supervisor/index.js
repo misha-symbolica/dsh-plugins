@@ -279,6 +279,8 @@ export function apply(ctx, config) {
   })
 
 
+  const showCore = createShowCore(deps)
+
   // ---------------- interactive Manipulate renders
 
   /** Find a live, supervised kernel of the given session by id (both ids come from the browser, untrusted). */
@@ -345,8 +347,14 @@ export function apply(ctx, config) {
       const image = result.images.find(i => i.mediaType === 'image/png') ?? result.images[0]
       if (image === undefined) return new Response(`render produced no image: ${stripReports(result.text).slice(0, 500)}`, { status: 500 })
       const size = pngSize(image.data)
+      // &save=1: also write this frame to the show directory (the picture icon → Preview) and report the path.
+      let savedPath
+      if (url.searchParams.get('save') === '1') {
+        try { savedPath = await showCore.writeShowFile(image.data, entry.scale) } catch { /* reported as absent */ }
+      }
       const headers = {
         'content-type': image.mediaType, 'content-length': String(image.data.byteLength), 'cache-control': 'no-store',
+        ...(savedPath !== undefined ? { 'x-wolfram-path': encodeURIComponent(savedPath) } : {}),
         'x-wolfram-scale': String(entry.scale), ...(size ? { 'x-wolfram-width': String(size.width), 'x-wolfram-height': String(size.height) } : {}),
         'x-wolfram-eval-ms': String(report?.evalMs ?? ''), 'x-wolfram-raster-ms': String(report?.rasterMs ?? ''), 'x-wolfram-kernel-ms': String(report?.kernelMs ?? ''), 'x-wolfram-total-ms': String(totalMs),
         'x-wolfram-error-image': report?.errorImage ? '1' : '0',
@@ -360,7 +368,6 @@ export function apply(ctx, config) {
 
   // ---------------- slash commands and the open route
 
-  const showCore = createShowCore(deps)
   const showDirectory = () => resolvePath(config.showDirectory.replace(/^~(?=\/|$)/, homedir()))
 
   ctx.effect(() => ctx.commands.register({

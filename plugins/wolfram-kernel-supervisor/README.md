@@ -75,7 +75,13 @@ The host adds the round-trip time; the card shows `eval · raster · round trip`
 150 ms with a trailing frame (host round trip is a fairly constant ~80 ms on top,
 absorbed by the throttle). A slow render or a 422 (body failed for those values —
 the last frame is kept and the messages shown) switches live off until a fast
-render happens again. The footer shows `… · live` while active. On release
+render happens again. The status row under the frame shows `eval · raster ·
+round trip` (+ `live`) and a picture icon: click → the current values are rendered
+once more with `&save=1` (a PNG in the show directory) and opened in the system
+viewer. Layout follows Mathematica: controls above the frame, status below; no
+caption link for interactive graphics. Card titles summarize the expression as
+`Head[...]` (`/wolfram-show: Manipulate[...]`) when it is one bracketed
+expression, else the first line truncated. On release
 the browser fetches `GET /api/wolfram/manipulate?sessionId&kernelId&id&values=[…]`;
 the host validates every value against the descriptor (sliders clamped, choice
 indices bounded, booleans) and evaluates `DSHPlugin\`Render[id, values]` — the

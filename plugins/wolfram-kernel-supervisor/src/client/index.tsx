@@ -283,6 +283,7 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
   const [busy, setBusy] = useState(false)
   const [dead, setDead] = useState<string | undefined>(undefined)
   const [problem, setProblem] = useState<string | undefined>(undefined)
+  const [opening, setOpening] = useState(false)
   const [lastTiming, setLastTiming] = useState<ShowTiming | undefined>(timing)
   const [size, setSize] = useState<{ w: number, h: number }>({ w: image.width / scale, h: image.height / scale })
   const inflight = useRef(false)
@@ -360,11 +361,19 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
     }, wait)
   }
 
+  /** Render the current values once more with &save=1 (a file on disk), then open it in the system viewer. */
+  const openCurrent = async () => {
+    setOpening(true)
+    try {
+      const response = await fetch(`${manipulateUrl(sessionId, kernelId, descriptor.id, values)}&save=1`, { credentials: 'same-origin' })
+      const saved = response.headers.get('x-wolfram-path')
+      if (response.ok && saved) openShown(decodeURIComponent(saved))
+      else if (!response.ok && path !== undefined) openShown(path)
+    } catch { if (path !== undefined) openShown(path) } finally { setOpening(false) }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start', maxWidth: '100%' }}>
-      <div style={{ ...IMAGE_FRAME, opacity: busy && !live ? 0.75 : 1, transition: 'opacity 120ms' }}>
-        <img src={src} alt={alt} title={path ?? alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} />
-      </div>
       <div style={CONTROLS_STYLE} data-wolfram-manipulate={descriptor.id} data-live={live || undefined}>
         {descriptor.controls.map((control, i) => {
           const v = values[i] as ControlValue
@@ -413,11 +422,38 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
           )
         })}
       </div>
-      <div style={{ fontSize: 11, opacity: 0.55, fontVariantNumeric: 'tabular-nums' }}>
-        {timingLabel(lastTiming)}{live ? ' · live' : ''}
+      <div style={{ ...IMAGE_FRAME, opacity: busy && !live ? 0.75 : 1, transition: 'opacity 120ms' }}>
+        <img src={src} alt={alt} title={alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} />
       </div>
+      <StatusRow timing={lastTiming} live={live} onOpen={dead === undefined ? () => { void openCurrent() } : undefined} opening={opening} />
       {problem !== undefined && <pre style={{ ...PRE_STYLE, fontSize: 11, opacity: 0.8 }}>{problem}</pre>}
       {dead !== undefined && <div style={{ fontSize: 12, opacity: 0.7 }}>controls disabled — {dead}</div>}
+    </div>
+  )
+}
+
+/** Small picture glyph for "open this frame in the system viewer". */
+const PICTURE = (
+  <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden style={{ display: 'block' }}>
+    <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    <circle cx="5.5" cy="6.5" r="1.3" fill="currentColor" />
+    <path d="M2.5 12.5l3.5-3.5 2.5 2.5 2.5-3 3 4" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+  </svg>
+)
+
+/** Status line under a live frame: timings, live tag, and the open-in-viewer icon. */
+function StatusRow({ timing, live, onOpen, opening }: { timing: ShowTiming | undefined, live: boolean, onOpen: (() => void) | undefined, opening: boolean }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, opacity: 0.6, fontVariantNumeric: 'tabular-nums' }}>
+      <span>{timingLabel(timing)}{live ? ' · live' : ''}</span>
+      {onOpen !== undefined && (
+        <button
+          type="button" title="Open this frame in the image viewer" onClick={onOpen} disabled={opening}
+          style={{ all: 'unset', cursor: opening ? 'progress' : 'pointer', display: 'inline-flex', opacity: opening ? 0.5 : 1 }}
+        >
+          {PICTURE}
+        </button>
+      )}
     </div>
   )
 }
@@ -547,6 +583,18 @@ function showMetaOf(block: Block): ShowMeta | undefined {
   }
 }
 
+/**
+ * Short title for a Wolfram expression: `Head[...]` when the text is one
+ * bracketed expression (`Manipulate[…]`, `Plot3D[…]`), else the first line
+ * truncated with an ellipsis.
+ */
+function headSummary(expr: string, max = 40): string {
+  const text = expr.trim()
+  const m = /^([A-Za-z$][\w$`]*)\[/.exec(text)
+  if (m !== null && text.endsWith(']')) return `${m[1]}[...]`
+  return firstLine(text, max)
+}
+
 function firstLine(s: string, max = 80): string {
   const line = s.split('\n')[0] ?? ''
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
@@ -558,7 +606,7 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
   const expression = typeof args.expression === 'string' ? args.expression : ''
   const meta = showMetaOf(block)
   const text = resultText(block)
-  const label = meta?.label ?? firstLine(expression)
+  const label = meta?.label ?? headSummary(expression)
   const kernelId = meta?.kernelId ?? kernelIdOf(block)
   const size = meta?.devicePixels && meta.points ? `${meta.points.width}×${meta.points.height} pt${meta.scale && meta.scale !== 1 ? ` @${meta.scale}x` : ''}` : ''
   const summary = [kernelId, state === 'running' ? 'rendering…' : size, meta?.manipulate !== undefined ? 'interactive' : '', meta?.timing?.totalMs !== null && meta?.timing?.totalMs !== undefined ? `${meta.timing.totalMs} ms` : ''].filter(Boolean).join(' · ')
@@ -571,7 +619,8 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
           {meta?.manipulate !== undefined && meta.attachment !== null && meta.kernelId !== undefined
             ? <ManipulateWidget sessionId={String(sessionId)} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(String(sessionId), meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={label} path={meta.path ?? undefined} timing={meta.timing} />
             : <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />}
-          <ShowCaption label={label} path={meta?.path ?? undefined} />
+          {meta?.manipulate === undefined && <ShowCaption label={label} path={meta?.path ?? undefined} />}
+          {meta?.manipulate === undefined && meta?.timing && <StatusRow timing={meta.timing} live={false} onOpen={undefined} opening={false} />}
           {meta?.errorImage && <div style={{ fontSize: 12, opacity: 0.8 }}>⚠ the rendering contains an error box</div>}
           <details style={{ fontSize: 12, opacity: 0.7 }}>
             <summary>expression</summary>
@@ -615,7 +664,7 @@ export function WolframShowCommandCard({ node, sessionId }: CommandProps) {
     } catch { /* not our payload; fall through to text */ }
   }
   const state: RowState = outcome === null ? 'running' : outcome.kind === 'error' ? 'error' : 'ok'
-  const label = payload?.label ?? firstLine(payload?.expression ?? args)
+  const label = payload?.label ?? headSummary(payload?.expression ?? args)
   const size = payload?.points && payload.scale ? `${payload.points.width}×${payload.points.height} pt @${payload.scale}x` : ''
   const summary = [payload?.kernelId, state === 'running' ? 'rendering…' : size, payload?.manipulate ? 'interactive' : ''].filter(Boolean).join(' · ')
   return (
@@ -625,7 +674,7 @@ export function WolframShowCommandCard({ node, sessionId }: CommandProps) {
       {state === 'ok' && payload !== undefined && (
         <>
           <ShowBody sessionId={String(sessionId)} meta={payload} alt={label} />
-          <ShowCaption label={label} path={payload.path ?? undefined} />
+          {payload.manipulate === undefined && <ShowCaption label={label} path={payload.path ?? undefined} />}
         </>
       )}
       {state === 'ok' && payload === undefined && <pre style={PRE_STYLE}>{outcome?.text ?? ''}</pre>}
@@ -641,7 +690,7 @@ export function WolframCommandCard({ node }: CommandProps) {
   const kernelId = /\[(wl:\d+:\d+)\]/.exec(outcome?.text ?? '')?.[1]
   const output = (outcome?.text ?? '').replace(/^Opened kernel [^\n]*\n?/, '').replace(/^\[wl:\d+:\d+\]\n?/, '')
   return (
-    <KernelRow title={`/${node.name ?? 'wolfram'}`} summary={[kernelId, state === 'running' ? 'evaluating…' : firstLine(args)].filter(Boolean).join(' · ')} state={state} defaultOpen>
+    <KernelRow title={`/${node.name ?? 'wolfram'}`} summary={[kernelId, state === 'running' ? 'evaluating…' : headSummary(args)].filter(Boolean).join(' · ')} state={state} defaultOpen>
       {args !== '' && <pre style={PRE_STYLE}>{args}</pre>}
       {state !== 'running' && output !== '' && <pre style={{ ...PRE_STYLE, opacity: 0.85, borderLeft: '2px solid color-mix(in srgb, currentColor 20%, transparent)', paddingLeft: 8 }}>{output}</pre>}
     </KernelRow>
@@ -658,7 +707,7 @@ export function WolframEvalRow({ toolName, block, loadImage }: Props) {
   const refs = imageRefsOf(block)
   const kernelId = kernelIdOf(block)
   const output = text.replace(/^\[wl:\d+:\d+\]\n?/, '').replace(/^Opened kernel [^\n]*\n?/, '')
-  const summary = [kernelId, state === 'running' ? 'evaluating…' : firstLine(code)].filter(Boolean).join(' · ')
+  const summary = [kernelId, state === 'running' ? 'evaluating…' : headSummary(code)].filter(Boolean).join(' · ')
   const title = toolName === 'wolfram_run' ? 'Wolfram run' : 'Wolfram eval'
   return (
     <KernelRow title={title} summary={summary} state={state} defaultOpen={refs.length > 0}>
@@ -776,7 +825,7 @@ function ShownGallery({ matched, sessionId }: GalleryProps) {
           {item.meta.manipulate !== undefined && item.meta.kernelId !== undefined
             ? <ManipulateWidget sessionId={sessionId} kernelId={item.meta.kernelId} descriptor={item.meta.manipulate} initialUrl={shownImageUrl(sessionId, item.meta.attachment)} image={item.meta.attachment} scale={item.meta.scale ?? 2} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} timing={item.meta.timing} />
             : <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />}
-          <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} />
+          {item.meta.manipulate === undefined && <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} />}
         </figure>
       ))}
     </div>
