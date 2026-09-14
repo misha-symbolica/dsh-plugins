@@ -79,7 +79,10 @@ render happens again. The status row under the frame shows `eval · raster ·
 round trip` (+ `live`) and a picture icon: click → the current values are rendered
 once more with `&save=1` (a PNG in the show directory) and opened in the system
 viewer. Layout follows Mathematica: controls above the frame, status below; no
-caption link for interactive graphics. Card titles summarize the expression as
+caption link for interactive graphics. The rounded frame pads the raster by 8 px
+(no clipping into the image) and fills the padding with the median colour of the
+raster's one-pixel border ring (canvas sample on load) — transparent for the
+default transparent renders, the page colour for `background: opaque`. Card titles summarize the expression as
 `Head[...]` (`/wolfram-show: Manipulate[...]`) when it is one bracketed
 expression, else the first line truncated. On release
 the browser fetches `GET /api/wolfram/manipulate?sessionId&kernelId&id&values=[…]`;
