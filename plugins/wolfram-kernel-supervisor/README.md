@@ -14,7 +14,7 @@ Nothing else reaches the model (no `mcp__*` names, no dsh-mcp-client).
 |---|---|
 | `wolfram_eval {code, kernelId?, timeConstraint?}` | Evaluate code; definitions persist per kernel. Graphics come back as images (attached to the model when it accepts images, else saved to disk). |
 | `wolfram_run {path, args?, kernelId?}` | `Get[]` a `.wl`/`.wls`/`.m` script inside the kernel; `$ScriptCommandLine = {path, ...args}`. Its definitions stay available to later calls. |
-| `wolfram_show {expression, kernelId?, resolution?=144, see?=false, label?}` | `Rasterize` the expression @2x in the kernel and **show it to the user** (tool card + a pinned gallery under the turn's final answer). The model gets one line + the PNG path; `see:true` also hands it the image. |
+| `wolfram_show {expression, kernelId?, resolution?=144, see?=false, label?, background?=transparent}` | `Rasterize` the expression @2x in the kernel (transparent PNG; the kernel's front end is pinned to the GUI's light/dark appearance so text, axes and Plot themes match) and **show it to the user** (tool card + a pinned gallery under the turn's final answer, label = link that opens the file). The model gets one line + the PNG path; `see:true` also hands it the image. |
 | `wolfram_symbol {symbols}` / `wolfram_lint {code}` | `SymbolDefinition` / `CodeInspector` passthroughs. |
 | `wolfram_kernel_open {label?}` | Start another kernel (becomes the default). |
 | `wolfram_kernel_close {kernelId?, orphanPid?}` | Close a kernel (default: last-started); or SIGKILL a stray unsupervised kernel process whose parent is dead. |
@@ -27,10 +27,10 @@ caller's session; subagents get their own session (`subagents: true`).
 
 ## How the image reaches the user (and not the model)
 
-1. Host: `wolfram_show` evaluates `Rasterize[(expr), ImageResolution -> 144]`
+1. Host: `wolfram_show` evaluates `Rasterize[(expr), Background -> None, ImageResolution -> 144]`
    through `WolframLanguageEvaluator` (the stock tool already returns graphics
    as MCP `image` blocks), stores the PNG with `ctx.attachments.saveImages`
-   (no model-capability gate), writes `~/Library/Wolfram/AgentToolsShow/<ts>-<md5:8>@2x.png`,
+   (no model-capability gate), writes `~/Library/Wolfram/DeepseekHarness/<ts>-<md5:8>@2x.png`,
    returns one line via `output.render`, and puts the attachment reference +
    `points`/`scale` into `output.presentationMeta` (persisted card metadata the
    model never sees).
@@ -51,13 +51,13 @@ caller's session; subagents get their own session (`subagents: true`).
 
 ## Kernel lifecycle
 
-- Spawn (lazy, on first use): `wolfram -nopaclet -noinit -noprompt -run 'PacletDirectoryLoad["<AgentTools dir>"]; Needs["Wolfram`AgentTools`"]; Wolfram`AgentTools`StartMCPServer[]'`, `MCP_SERVER_NAME=WolframLanguage`, cwd = chat workspace. Bootstrap eval `SetDirectory[cwd]; $ProcessID` captures the evaluator `session` id. ~2.3 s.
+- Spawn (lazy, on first use): `wolfram -nopaclet -noinit -noprompt -run 'PacletDirectoryLoad["<AgentTools dir>"]; Needs["Wolfram`AgentTools`"]; Wolfram`AgentTools`StartMCPServer[]'`, `MCP_SERVER_NAME=WolframLanguage`, cwd = chat workspace. Bootstrap eval `SetDirectory[cwd]; UsingFrontEnd[CurrentValue[$FrontEndSession, LightDark] = "Dark"|"Light"]; $ProcessID` pins the appearance (config `theme: auto|light|dark`; `auto` = DSH `ui-theme` setting, `system` resolved via macOS `AppleInterfaceStyle`) and captures the evaluator `session` id. ~2 s.
 - **Shutdown ladder** (`servers.mjs`): write `Quit`, end stdin → wait 2 s → `SIGKILL` → `SIGKILL` child kernels. The kernel **ignores SIGTERM/SIGINT**; MCP-SDK-style SIGTERM closes are how 23 orphans accumulated on this machine before this plugin existed.
 - Idle timer per session (`idleMinutes`, default 60) closes kernels and injects a notice; `agent/disposed` and plugin unload close everything. Caps: `maxKernelsPerSession` 4, `maxKernelsGlobal` 12.
 
 ## Config
 
-See the header of `index.js`. Defaults need nothing: Wolfram.app, highest installed `Wolfram__AgentTools-*` paclet, 144 dpi, files under `~/Library/Wolfram/AgentToolsShow`.
+See the header of `index.js`. Defaults need nothing: Wolfram.app, highest installed `Wolfram__AgentTools-*` paclet, 144 dpi, `theme: auto`, files under `~/Library/Wolfram/DeepseekHarness`.
 
 ## Develop
 

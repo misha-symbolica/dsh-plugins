@@ -73,11 +73,12 @@ function cleanRef(ref) {
  * @param {(agent: object) => string} deps.labelOf
  * @param {{ resolution: number, writeFiles: boolean, showDirectory: string }} deps.config
  * @param {(record: object) => void} deps.trace
+ * @param {(kernel: object) => 'light' | 'dark'} deps.themeOf
  * @param {object} fallbackAgent - the agent these tools are registered for.
  * @returns {object[]} tool definitions
  */
 export function createTools(deps, fallbackAgent) {
-  const { sessions, admitImage, storeImage, labelOf, config, trace } = deps
+  const { sessions, admitImage, storeImage, labelOf, config, trace, themeOf } = deps
   const tools = []
   /** Image refs awaiting finalizeContent, keyed by execution. */
   const pending = new WeakMap()
@@ -232,12 +233,13 @@ export function createTools(deps, fallbackAgent) {
 
   tools.push(defineTool({
     name: 'wolfram_show',
-    description: 'Render a Wolfram Language expression (plot, graphic, grid, typeset formula, image, Style[…]) at retina resolution and SHOW IT TO THE USER inline in the chat, evaluated in this chat\'s kernel so it can use variables you defined with wolfram_eval. The image is displayed to the user directly by the GUI; you receive one line of metadata and the PNG path. Do NOT call read_image or wolfram_show again on the result — it is already visible. Set see:true only when YOU need to inspect the rendering too (costs image tokens).',
+    description: 'Render a Wolfram Language expression (plot, graphic, grid, typeset formula, image, Style[…]) at retina resolution and SHOW IT TO THE USER inline in the chat, evaluated in this chat\'s kernel so it can use variables you defined with wolfram_eval. The image is displayed to the user directly by the GUI; you receive one line of metadata and the PNG path. Do NOT call read_image or wolfram_show again on the result — it is already visible. Graphics follow the GUI\'s light/dark appearance automatically (the kernel\'s front end is pinned to it). Set see:true only when YOU need to inspect the rendering too (costs image tokens).',
     parameters: {
       expression: { type: 'string', required: true, description: 'Expression to render, e.g. Plot[Sin[x], {x, 0, 2 Pi}] or Grid[data, Frame -> All]. Multiple statements allowed; the last one is rendered.' },
       kernelId: KERNEL_ID,
       resolution: { type: 'integer', description: 'Rasterize ImageResolution in dpi (default 144 = @2x retina; 72 = 1x).' },
       see: { type: 'boolean', description: 'Also return the image to you, the model (default false: user-only).' },
+      background: { type: 'string', enum: ['transparent', 'opaque'], description: 'transparent (default): PNG with alpha so the chat background shows through; opaque: the kernel\'s own light/dark page colour.' },
       label: { type: 'string', description: 'Optional caption shown under the image.' },
       timeConstraint: TIME_CONSTRAINT,
     },
@@ -245,13 +247,16 @@ export function createTools(deps, fallbackAgent) {
       schema: { type: 'object', additionalProperties: true },
       render: (_args, v) => [{ type: 'text', text: tagged(v, `displayed ${v.label || 'image'}: ${v.devicePixels.width}x${v.devicePixels.height} px = ${v.points.width}x${v.points.height} pt (@${v.scale}x)${v.path ? `, ${v.path}` : ''}. ${v.attachment !== null ? 'Shown to the user inline already; do not call read_image or wolfram_show on it again.' : `Not shown inline (${v.inlineUnavailable}); the PNG is on disk at the path above.`}${v.see && v.attachment !== null ? ' Image attached below for you.' : ''}`) }],
       // Card metadata the client renders; never part of the model-visible content.
-      presentationMeta: (_args, v) => ({ attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId }),
+      presentationMeta: (_args, v) => ({ attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme }),
     },
     async execute(args, exec) {
       const { kernel, opened } = await sessions.resolve(agentOf(exec), args.kernelId)
       const resolution = args.resolution ?? config.resolution
       const scale = resolution / 72
-      const code = `Rasterize[(\n${args.expression}\n), ImageResolution -> ${resolution}]`
+      // Background -> None: transparent PNG, so the GUI's own light/dark page shows
+      // through (a bare Graphics otherwise gets Rasterize's opaque page fill).
+      const background = args.background === 'opaque' ? 'Automatic' : 'None'
+      const code = `Rasterize[(\n${args.expression}\n), Background -> ${background}, ImageResolution -> ${resolution}]`
       const { text, images } = await evaluate(kernel, code, { timeConstraint: args.timeConstraint })
       const image = images.find(i => i.mediaType === 'image/png') ?? images[0]
       if (image === undefined) throw new Error(`wolfram_show produced no image. Kernel output:\n${text || '(empty)'}`)
@@ -263,7 +268,7 @@ export function createTools(deps, fallbackAgent) {
         kernelId: kernel.id, opened, startupMs: kernel.startupMs,
         attachment: stored.ref !== undefined ? cleanRef(stored.ref) : null,
         devicePixels: size, points, scale, resolution, bytes: image.data.byteLength,
-        see: args.see === true, label: args.label ?? '',
+        see: args.see === true, label: args.label ?? '', theme: themeOf(kernel),
         ...(path !== undefined ? { path } : {}),
         ...(stored.ref === undefined ? { inlineUnavailable: stored.reason ?? 'attachment store unavailable' } : {}),
       }
@@ -309,7 +314,7 @@ export function createTools(deps, fallbackAgent) {
 
 /** Text table for wolfram_kernel_list. */
 function renderList(v) {
-  const row = (k) => `${k.kernelId}${k.default ? ' *' : ''}${k.label ? ` "${k.label}"` : ''}  pid ${k.pid}${k.sandboxPid && k.sandboxPid !== k.pid ? ` (evaluator ${k.sandboxPid})` : ''}  ${k.starting ? 'starting' : k.alive ? 'alive' : 'DEAD'}  started ${k.startedAt}  idle ${k.idleSeconds}s  evals ${k.evalCount}  cwd ${k.cwd}`
+  const row = (k) => `${k.kernelId}${k.default ? ' *' : ''}${k.label ? ` "${k.label}"` : ''}  pid ${k.pid}${k.sandboxPid && k.sandboxPid !== k.pid ? ` (evaluator ${k.sandboxPid})` : ''}  ${k.starting ? 'starting' : k.alive ? 'alive' : 'DEAD'}  started ${k.startedAt}  idle ${k.idleSeconds}s  evals ${k.evalCount}  ${k.theme}  cwd ${k.cwd}`
   const lines = []
   if (v.session === null || v.kernels.length === 0) lines.push('This chat has no Wolfram kernel running (the next wolfram_* call starts one).')
   else lines.push(`This chat (session ${v.session}), * = default:`, ...v.kernels.map(row))

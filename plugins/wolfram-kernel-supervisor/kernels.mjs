@@ -61,7 +61,7 @@ export async function evaluate(kernel, code, opts = {}) {
 export class KernelSessions {
   /**
    * @param {object} options
-   * @param {(session: Session, kernelIndex: number) => { command: string, args: string[], env: object, cwd?: string, clientName: string }} options.spec
+   * @param {(session: Session, kernelIndex: number) => { command: string, args: string[], env: object, cwd?: string, clientName: string, bootstrap?: string }} options.spec - `bootstrap`: extra Wolfram code run once after SetDirectory (e.g. the light/dark front-end setting)
    * @param {number} options.timeoutMs - per MCP call.
    * @param {number} options.idleMs - 0 disables idle closing.
    * @param {number} options.maxPerSession
@@ -142,7 +142,7 @@ export class KernelSessions {
     /** @type {Kernel} */
     const kernel = {
       id, index: kernelIndex, label: label ?? '', conn: undefined, pid: undefined, sandboxPid: undefined,
-      evalSession: undefined, startedAt, lastUsedAt: startedAt, evalCount: 0, cwd: spec.cwd ?? process.cwd(), startupMs: 0, ready: undefined,
+      evalSession: undefined, startedAt, lastUsedAt: startedAt, evalCount: 0, cwd: spec.cwd ?? process.cwd(), startupMs: 0, ready: undefined, theme: session.theme ?? 'light',
     }
     session.kernels.set(kernelIndex, kernel)
     session.order.push(kernelIndex)
@@ -173,7 +173,7 @@ export class KernelSessions {
       // Bootstrap: pin the evaluator to the chat's cwd, learn the sandbox pid,
       // capture the evaluator session id, and absorb the ~6 s first-eval autoload.
       try {
-        const { text } = await evaluate(kernel, `SetDirectory[${wlString(kernel.cwd)}]; $ProcessID`)
+        const { text } = await evaluate(kernel, `SetDirectory[${wlString(kernel.cwd)}]; ${spec.bootstrap ?? ''} $ProcessID`)
         const pid = /(\d+)\s*$/.exec(text)
         if (pid !== null) kernel.sandboxPid = Number(pid[1])
         kernel.evalCount = 0
@@ -288,6 +288,7 @@ export class KernelSessions {
       idleSeconds: Math.round((Date.now() - kernel.lastUsedAt) / 1000),
       evalCount: kernel.evalCount,
       cwd: kernel.cwd,
+      theme: kernel.theme,
     }
   }
 
@@ -330,6 +331,7 @@ export class KernelSessions {
  * @property {string} cwd
  * @property {number} startupMs
  * @property {Promise<Kernel> | undefined} ready
+ * @property {'light' | 'dark'} theme - appearance the kernel's front end was pinned to at bootstrap
  */
 /**
  * @typedef {object} Session

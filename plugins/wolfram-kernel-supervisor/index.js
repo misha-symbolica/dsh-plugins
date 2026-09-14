@@ -36,7 +36,9 @@
  *   server: WolframLanguage    # MCP_SERVER_NAME profile (WolframLanguage | Wolfram | WolframAlpha)
  *   resolution: 144            # wolfram_show default dpi (144 = @2x)
  *   writeFiles: true           # also write show/eval PNGs to showDirectory
- *   showDirectory: ~/Library/Wolfram/AgentToolsShow
+ *   showDirectory: ~/Library/Wolfram/DeepseekHarness   # PNGs written by wolfram_show / unadmitted wolfram_eval images
+ *   theme: auto                # auto | light | dark — kernels render graphics for this appearance; auto follows
+ *                              # DSH's Settings ▸ Appearance (ui-theme), resolving "system" via macOS AppleInterfaceStyle
  *   subagents: true            # delegated child agents get the tools too (each its own session)
  *   idleMinutes: 60            # close a session's kernels after this long unused (0 = never)
  *   maxKernelsPerSession: 4
@@ -45,6 +47,7 @@
  *   traceFile: ''              # append JSON lifecycle lines here ('' = off)
  */
 
+import { execFileSync } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
 import Schema from '@deepseek-ai/schemastery'
 import { KernelSessions } from './kernels.mjs'
@@ -61,7 +64,8 @@ export const Config = Schema.object({
   server: Schema.string().default('WolframLanguage'),
   resolution: Schema.number().min(36).max(576).default(144),
   writeFiles: Schema.boolean().default(true),
-  showDirectory: Schema.string().default('~/Library/Wolfram/AgentToolsShow'),
+  showDirectory: Schema.string().default('~/Library/Wolfram/DeepseekHarness'),
+  theme: Schema.union(['auto', 'light', 'dark']).default('auto'),
   subagents: Schema.boolean().default(true),
   idleMinutes: Schema.number().min(0).default(60),
   maxKernelsPerSession: Schema.number().min(1).default(4),
@@ -103,12 +107,42 @@ export function apply(ctx, config) {
     return text.replace(/\s+/g, ' ').slice(0, 60)
   }
 
+  /**
+   * The appearance kernels should render for. `auto` reads DSH's persisted
+   * theme preference (settings namespace `ui-theme`, field `preference`;
+   * absent/`system` when the user never changed it) and resolves `system`
+   * through macOS (`defaults read -g AppleInterfaceStyle` prints "Dark" only in
+   * dark mode). Decided once per kernel, at bootstrap — a theme switch applies
+   * to kernels started afterwards.
+   * @returns {'light' | 'dark'}
+   */
+  function resolveTheme() {
+    if (config.theme !== 'auto') return config.theme
+    let preference
+    try { preference = ctx.get('settings')?.get('ui-theme')?.preference } catch { /* namespace unregistered */ }
+    if (preference === 'light' || preference === 'dark') return preference
+    if (process.platform === 'darwin') {
+      try {
+        return execFileSync('defaults', ['read', '-g', 'AppleInterfaceStyle'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() === 'Dark' ? 'dark' : 'light'
+      } catch { return 'light' } // the key is absent in light mode
+    }
+    return 'light'
+  }
+
+  /** Wolfram code that pins the kernel's front-end appearance (Plot themes, Grid frames, Rasterize background follow it). */
+  const themeBootstrap = (theme) => `UsingFrontEnd[CurrentValue[$FrontEndSession, LightDark] = ${theme === 'dark' ? '"Dark"' : '"Light"'}];`
+
   const sessions = new KernelSessions({
-    spec: (session, kernelIndex) => ({
-      ...launch,
-      clientName: `DSH ${chatLabel(session.agent)} · wl:${session.index}:${kernelIndex}`,
-      cwd: session.agent.session.header?.cwd,
-    }),
+    spec: (session, kernelIndex) => {
+      const theme = resolveTheme()
+      session.theme = theme
+      return {
+        ...launch,
+        clientName: `DSH ${chatLabel(session.agent)} · wl:${session.index}:${kernelIndex}`,
+        cwd: session.agent.session.header?.cwd,
+        bootstrap: themeBootstrap(theme),
+      }
+    },
     timeoutMs: config.toolCallTimeoutMs,
     idleMs: config.idleMinutes * 60_000,
     maxPerSession: config.maxKernelsPerSession,
@@ -160,6 +194,7 @@ export function apply(ctx, config) {
   const deps = {
     sessions, admitImage, storeImage, labelOf: chatLabel, trace,
     config: { resolution: config.resolution, writeFiles: config.writeFiles, showDirectory: config.showDirectory },
+    themeOf: (kernel) => kernel.theme ?? 'light',
   }
 
 

@@ -161,14 +161,40 @@ function useImageUrl(source: { url: string } | { loadImage: LoadImage }, image: 
   return { url, failed }
 }
 
+/**
+ * Shrink-wrapped hairline frame. No fill: the kernel renders graphics for the
+ * GUI's own appearance (host `theme`), so the PNG carries the right background
+ * and a white plate here would be wrong in dark mode. `width: fit-content`
+ * plus `alignSelf: flex-start` stop flex parents from stretching the frame past
+ * the image (the bug in the first live build).
+ */
 const IMAGE_FRAME: CSSProperties = {
-  display: 'inline-block',
-  background: '#fff',
-  borderRadius: 6,
-  padding: 6,
-  boxShadow: '0 0 0 1px color-mix(in srgb, currentColor 12%, transparent)',
+  display: 'block',
+  width: 'fit-content',
   maxWidth: '100%',
+  alignSelf: 'flex-start',
+  borderRadius: 6,
+  overflow: 'hidden',
+  boxShadow: '0 0 0 1px color-mix(in srgb, currentColor 14%, transparent)',
   boxSizing: 'border-box',
+}
+
+/** Caption: the label (or the expression head) styled as a link; tooltip = path; click opens the PNG in the system viewer via the host. */
+function ShowCaption({ label, path, openFile }: { label: string, path: string | undefined, openFile: ((path: string) => void) | undefined }) {
+  const text = label !== '' ? label : 'image'
+  if (path === undefined || openFile === undefined) return <div style={{ fontSize: 12, opacity: 0.75 }}>{text}</div>
+  return (
+    <div style={{ fontSize: 12 }}>
+      <a
+        href="#"
+        title={path}
+        onClick={(event) => { event.preventDefault(); openFile(path) }}
+        style={{ color: 'inherit', opacity: 0.85, textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, currentColor 40%, transparent)', textUnderlineOffset: 3, cursor: 'pointer' }}
+      >
+        {text}
+      </a>
+    </div>
+  )
 }
 
 // NB: the reference prop is `image`, not `ref` — React reserves `ref` and
@@ -180,7 +206,7 @@ function WolframImage({ source, image, pointWidth, alt, path }: { source: { url:
   if (failed || broken) return <div style={{ opacity: 0.7, fontSize: 12 }}>[image unavailable{path ? `: ${path}` : ''}]</div>
   if (url === undefined) return <div style={{ ...IMAGE_FRAME, width, aspectRatio: `${image.width} / ${image.height}`, opacity: 0.4 }} />
   return (
-    <span style={IMAGE_FRAME}>
+    <div style={IMAGE_FRAME}>
       <img
         src={url}
         alt={alt}
@@ -190,7 +216,7 @@ function WolframImage({ source, image, pointWidth, alt, path }: { source: { url:
         onError={() => setBroken(true)}
         title={path ?? alt}
       />
-    </span>
+    </div>
   )
 }
 
@@ -204,8 +230,8 @@ const SPIKEY = (
 
 const ROW_STYLE: CSSProperties = { fontSize: 13, lineHeight: '20px' }
 const SUMMARY_STYLE: CSSProperties = { opacity: 0.7, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
-const BODY_STYLE: CSSProperties = { padding: '6px 0 8px 22px', display: 'flex', flexDirection: 'column', gap: 8 }
-const PRE_STYLE: CSSProperties = { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, lineHeight: '18px', maxHeight: 360, overflow: 'auto' }
+const BODY_STYLE: CSSProperties = { padding: '6px 0 8px 22px', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8 }
+const PRE_STYLE: CSSProperties = { margin: 0, alignSelf: 'stretch', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, lineHeight: '18px', maxHeight: 360, overflow: 'auto' }
 
 function leading(state: RowState): ReactNode {
   if (state === 'ok') return <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>{SPIKEY}</span>
@@ -275,7 +301,7 @@ function firstLine(s: string, max = 80): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
-export function WolframShowRow({ block, loadImage, sessionId }: Props) {
+export function WolframShowRow({ block, loadImage, sessionId, openFile }: Props) {
   const state = stateOf(block)
   const args = parseArgs(block)
   const expression = typeof args.expression === 'string' ? args.expression : ''
@@ -292,13 +318,7 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
       ? (
         <>
           <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />
-          {(meta?.label || meta?.path) && (
-            <div style={{ fontSize: 12, opacity: 0.7 }}>
-              {meta?.label ? <span>{meta.label}</span> : null}
-              {meta?.label && meta?.path ? ' · ' : null}
-              {meta?.path ? <code style={{ fontSize: 11 }}>{meta.path}</code> : null}
-            </div>
-          )}
+          <ShowCaption label={label} path={meta?.path ?? undefined} openFile={openFile} />
           <details style={{ fontSize: 12, opacity: 0.7 }}>
             <summary>expression</summary>
             <pre style={PRE_STYLE}>{expression}</pre>
@@ -430,19 +450,13 @@ type GalleryProps = Pick<TurnTailOwnerProps, 'openFile'> & { matched: readonly S
 const GALLERY_STYLE: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start', padding: '4px 0 8px' }
 
 /** The turn's shown images, pinned under the final answer (never folded away). */
-function ShownGallery({ matched, sessionId }: GalleryProps) {
+function ShownGallery({ matched, sessionId, openFile }: GalleryProps) {
   return (
     <div style={GALLERY_STYLE} data-wolfram-shown={matched.length}>
       {matched.map((item) => (
-        <figure key={item.callId} style={{ margin: 0, display: 'flex', flexDirection: 'column', gap: 4, maxWidth: '100%' }}>
+        <figure key={item.callId} style={{ margin: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
           <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />
-          {(item.meta.label || item.meta.path) && (
-            <figcaption style={{ fontSize: 12, opacity: 0.7 }}>
-              {item.meta.label ?? ''}
-              {item.meta.label && item.meta.path ? ' · ' : ''}
-              {item.meta.path ? <code style={{ fontSize: 11 }}>{item.meta.path}</code> : null}
-            </figcaption>
-          )}
+          <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} openFile={openFile} />
         </figure>
       ))}
     </div>
