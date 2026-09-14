@@ -21,6 +21,12 @@
  * &values=[…], which re-rasterizes the held body in the same kernel with the
  * variables substituted. Widgets die with their kernel (410 → controls disable).
  *
+ * SLASH COMMANDS (no model involved): `/wolfram-show <expression>` renders exactly
+ * like the wolfram_show tool and returns the presentation payload as JSON in the
+ * command result, which the browser half renders through the keyed
+ * `conversation.chat.commandview` slot; `/wolfram <code>` evaluates in the
+ * chat's default kernel and shows the output. `/wolfram-kernels` lists them.
+ *
  * IMAGE ROUTE. The GUI reads durable attachments only after the core proves
  * the session log references them in a *content* image block; a reference
  * that lives solely in presentationMeta (the user-only path) is invisible to
@@ -54,17 +60,19 @@
  *   traceFile: ''              # append JSON lifecycle lines here ('' = off)
  */
 
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { homedir } from 'node:os'
+import { resolve as resolvePath, sep } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { KernelSessions, evaluate } from './kernels.mjs'
 import { findAgentToolsDirectory, findKernel, kernelLaunch } from './servers.mjs'
-import { createTools, pngSize } from './tools.mjs'
+import { createShowCore, createTools, pngSize, showPresentation } from './tools.mjs'
 
 export const name = 'wolfram-kernel-supervisor'
 
-export const inject = ['agents', 'tools', 'connection']
+export const inject = ['agents', 'tools', 'connection', 'commands']
 
 export const Config = Schema.object({
   kernel: Schema.string().default(''),
@@ -86,6 +94,7 @@ const PLUGIN_SOURCE = { kind: 'plugin', plugin: 'wolfram-kernel-supervisor' }
 /** Exact Fetch routes (below /api). Mirrored in src/client. */
 export const SHOWN_IMAGE_PATH = '/api/wolfram/shown'
 export const MANIPULATE_PATH = '/api/wolfram/manipulate'
+export const OPEN_PATH = '/api/wolfram/open'
 /** Kernel-side support code, Get[]'d once per kernel at bootstrap (DSHPlugin` context). */
 export const KERNEL_PACKAGE = fileURLToPath(new URL('./kernel/DSHPlugin.wl', import.meta.url))
 
@@ -235,9 +244,11 @@ export function apply(ctx, config) {
     }
     try {
       for (const event of events) {
-        if (event.type !== 'tool/result') continue
-        const meta = event.data?.meta
-        const ref = meta?.attachment
+        let ref
+        if (event.type === 'tool/result') ref = event.data?.meta?.attachment
+        else if (event.type === 'command/done' && typeof event.data?.text === 'string' && event.data.text.includes(attachmentId)) {
+          try { ref = JSON.parse(event.data.text)?.attachment } catch { /* not a wolfram command payload */ }
+        } else continue
         if (ref && typeof ref === 'object' && String(ref.attachmentId) === attachmentId) return ref
       }
       return undefined
@@ -334,6 +345,74 @@ export function apply(ctx, config) {
       trace({ event: 'manipulate-render', kernelId, id, values })
       if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
       return new Response(image.data, { status: 200, headers })
+    },
+  })
+
+
+  // ---------------- slash commands and the open route
+
+  const showCore = createShowCore(deps)
+  const showDirectory = () => resolvePath(config.showDirectory.replace(/^~(?=\/|$)/, homedir()))
+
+  ctx.effect(() => ctx.commands.register({
+    name: 'wolfram-show',
+    description: 'Render a Wolfram Language expression in this chat\'s kernel and show it inline (Manipulate becomes interactive). No model involved.',
+    input: { hint: 'expression, e.g. Plot[Sin[x], {x, 0, 2 Pi}]' },
+    handler: async (invocation) => {
+      const expression = invocation.rawInput.trim()
+      if (expression === '') return { kind: 'error', text: 'usage: /wolfram-show <expression>' }
+      try {
+        const value = await showCore.show(invocation.agent, { expression, label: '' })
+        delete value.pngBytes
+        return { kind: 'success', text: JSON.stringify({ dsh: 'wolfram-show', expression, opened: value.opened, ...showPresentation(value) }) }
+      } catch (error) {
+        return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+      }
+    },
+  }), 'wolfram-kernel-supervisor: /wolfram-show')
+
+  ctx.effect(() => ctx.commands.register({
+    name: 'wolfram',
+    description: 'Evaluate Wolfram Language code in this chat\'s kernel and show the output. No model involved.',
+    input: { hint: 'code, e.g. Integrate[Sin[x]^2, x]' },
+    handler: async (invocation) => {
+      const code = invocation.rawInput.trim()
+      if (code === '') return { kind: 'error', text: 'usage: /wolfram <code>' }
+      try {
+        const { kernel, opened } = await sessions.resolve(invocation.agent, undefined)
+        const { text, images } = await evaluate(kernel, code)
+        const note = images.length > 0 ? `\n[${images.length} graphic${images.length === 1 ? '' : 's'} not shown — use /wolfram-show for graphics]` : ''
+        return { kind: 'success', text: `${opened ? `Opened kernel ${kernel.id}. ` : ''}[${kernel.id}]\n${text || '(no output)'}${note}` }
+      } catch (error) {
+        return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+      }
+    },
+  }), 'wolfram-kernel-supervisor: /wolfram')
+
+  ctx.effect(() => ctx.commands.register({
+    name: 'wolfram-kernels',
+    description: 'List this chat\'s Wolfram kernels.',
+    handler: async (invocation) => {
+      const own = sessions.listOwn(invocation.agent)
+      if (own.kernels.length === 0) return { kind: 'success', text: 'This chat has no Wolfram kernel running.' }
+      return { kind: 'success', text: own.kernels.map(k => `${k.kernelId}${k.default ? ' *' : ''}  pid ${k.pid}  ${k.theme}  idle ${k.idleSeconds}s  evals ${k.evalCount}`).join('\n') }
+    },
+  }), 'wolfram-kernel-supervisor: /wolfram-kernels')
+
+  /** GET /api/wolfram/open?path=… — reveal a PNG this plugin wrote in the system viewer (paths under showDirectory only). */
+  ctx.connection.fetch.register({
+    path: OPEN_PATH,
+    methods: ['GET', 'HEAD'],
+    fetch: async (request) => {
+      const raw = new URL(request.url).searchParams.get('path') ?? ''
+      const path = resolvePath(raw)
+      const root = showDirectory()
+      if (raw === '' || !(path === root || path.startsWith(root + sep)) || !path.endsWith('.png')) return new Response('not a wolfram_show image path', { status: 403 })
+      if (request.method === 'HEAD') return new Response(null, { status: 200 })
+      const opener = process.platform === 'darwin' ? 'open' : 'xdg-open'
+      await new Promise((done) => execFile(opener, [path], () => done()))
+      trace({ event: 'open', path })
+      return new Response('opened', { status: 200, headers: { 'content-type': 'text/plain' } })
     },
   })
 

@@ -25,6 +25,22 @@ Kernel ids are `wl:<session>:<kernel>` (`s:M:N`-style, like browser-automation).
 (`Opened kernel wl:0:0 …` prefixes that result). Ids are validated against the
 caller's session; subagents get their own session (`subagents: true`).
 
+## Slash commands (no model involved)
+
+| Command | Does |
+|---|---|
+| `/wolfram-show <expression>` | exactly what the `wolfram_show` tool does — same kernel, same card, Manipulate becomes interactive — but from the composer, with no agent turn and nothing added to the model's context |
+| `/wolfram <code>` | evaluate in the chat's default kernel; output shown as a card |
+| `/wolfram-kernels` | list this chat's kernels |
+
+Implementation: `ctx.commands.register` handlers receive `invocation.agent`, so they
+resolve the same per-chat kernel; `/wolfram-show` returns the presentation payload
+as JSON in the command result (`command/done` is log-only, never model-visible) and
+the browser half renders it through the keyed `conversation.chat.commandview` slot
+with the same body as the tool card. **Caveat:** the chat shows the hero, not the
+transcript, until a session has had one turn — command cards in a brand-new session
+appear only after the first message (core behaviour, applies to `/compact` too).
+
 ## Interactive `Manipulate`
 
 `wolfram_show` of a top-level `Manipulate[body, controls…]` becomes a live widget.
@@ -66,12 +82,13 @@ row and the pinned gallery each hold their own control state.
    (`ConversationNodeDefinition`, kind `wolframShown`) also collects the
    turn's shows and a `conversation.chat.turnTail` chain entry renders them
    as a pinned gallery under the final answer (never folded).
-3. Bytes: the core's attachment read authorizes only references found in
+3. Captions are links: click → `GET /api/wolfram/open?path=` (paths under `showDirectory` only) → `open` in the system viewer.
+4. Bytes: the core's attachment read authorizes only references found in
    *content* image blocks, so meta-only references 404. The host registers
    `GET /api/wolfram/shown?sessionId=&attachmentId=` via
    `ctx.connection.fetch` (behind normal browser auth) and authorizes by
    scanning the session's events (live or cold) for a `tool/result` whose
-   `meta.attachment.attachmentId` matches. `<img src>` uses it directly.
+   `meta.attachment.attachmentId` matches (or a `command/done` payload does). `<img src>` uses it directly.
 
 ## Kernel-side code
 

@@ -8,6 +8,12 @@
  *   wolfram_eval   text output plus any image blocks the result carries
  *   wolfram_run    (same row as wolfram_eval)
  *
+ * plus SLASH COMMAND cards: /wolfram-show, /wolfram and /wolfram-kernels (host
+ * commands that need no model) render through the keyed
+ * `conversation.chat.commandview` slot — the show command returns the same
+ * presentation payload as the tool's presentationMeta, as JSON in the result
+ * text, so its card is identical (image, widget, caption).
+ *
  * plus INTERACTIVE Manipulate widgets: when the host's presentationMeta carries
  * a `manipulate` descriptor (kernel/DSHPlugin.wl parsed the control specs),
  * native controls render next to the image and, on release, the <img> reloads
@@ -186,16 +192,21 @@ const IMAGE_FRAME: CSSProperties = {
   boxSizing: 'border-box',
 }
 
-/** Caption: the label (or the expression head) styled as a link; tooltip = path; click opens the PNG in the system viewer via the host. */
-function ShowCaption({ label, path, openFile }: { label: string, path: string | undefined, openFile: ((path: string) => void) | undefined }) {
+/** Reveal a plugin-written PNG in the system viewer through the host's open route (paths under showDirectory only). */
+function openShown(path: string): void {
+  void fetch(`/api/wolfram/open?path=${encodeURIComponent(path)}`, { credentials: 'same-origin' })
+}
+
+/** Caption: the label (or the expression head) styled as a link; tooltip = path; click opens the PNG in the system viewer. */
+function ShowCaption({ label, path }: { label: string, path: string | undefined }) {
   const text = label !== '' ? label : 'image'
-  if (path === undefined || openFile === undefined) return <div style={{ fontSize: 12, opacity: 0.75 }}>{text}</div>
+  if (path === undefined) return <div style={{ fontSize: 12, opacity: 0.75 }}>{text}</div>
   return (
     <div style={{ fontSize: 12 }}>
       <a
         href="#"
         title={path}
-        onClick={(event) => { event.preventDefault(); openFile(path) }}
+        onClick={(event) => { event.preventDefault(); openShown(path) }}
         style={{ color: 'inherit', opacity: 0.85, textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, currentColor 40%, transparent)', textUnderlineOffset: 3, cursor: 'pointer' }}
       >
         {text}
@@ -465,7 +476,7 @@ function firstLine(s: string, max = 80): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
-export function WolframShowRow({ block, loadImage, sessionId, openFile }: Props) {
+export function WolframShowRow({ block, loadImage, sessionId }: Props) {
   const state = stateOf(block)
   const args = parseArgs(block)
   const expression = typeof args.expression === 'string' ? args.expression : ''
@@ -484,7 +495,7 @@ export function WolframShowRow({ block, loadImage, sessionId, openFile }: Props)
           {meta?.manipulate !== undefined && meta.attachment !== null && meta.kernelId !== undefined
             ? <ManipulateWidget sessionId={String(sessionId)} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(String(sessionId), meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={label} path={meta.path ?? undefined} />
             : <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />}
-          <ShowCaption label={label} path={meta?.path ?? undefined} openFile={openFile} />
+          <ShowCaption label={label} path={meta?.path ?? undefined} />
           <details style={{ fontSize: 12, opacity: 0.7 }}>
             <summary>expression</summary>
             <pre style={PRE_STYLE}>{expression}</pre>
@@ -495,6 +506,67 @@ export function WolframShowRow({ block, loadImage, sessionId, openFile }: Props)
   return (
     <KernelRow title={`Wolfram show${label ? `: ${label}` : ''}`} summary={summary} state={state} defaultOpen={state !== 'running' && ref !== undefined}>
       {body}
+    </KernelRow>
+  )
+}
+
+
+/** The image or interactive widget for one show payload (tool-row body, gallery item, command card). */
+function ShowBody({ sessionId, meta, alt }: { sessionId: string, meta: ShowMeta, alt: string }) {
+  if (meta.attachment === null) return <div style={{ fontSize: 12, opacity: 0.7 }}>[image unavailable{meta.path ? `: ${meta.path}` : ''}]</div>
+  return meta.manipulate !== undefined && meta.kernelId !== undefined
+    ? <ManipulateWidget sessionId={sessionId} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(sessionId, meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={alt} path={meta.path ?? undefined} />
+    : <WolframImage source={{ url: shownImageUrl(sessionId, meta.attachment) }} image={meta.attachment} pointWidth={meta.points?.width} alt={alt} path={meta.path ?? undefined} />
+}
+
+// ---------------------------------------------------------------- /wolfram-show command card
+
+type CommandProps = PropsRuntime<'conversation.chat.commandview'>
+
+/** Renders the JSON payload the host's /wolfram-show command returns as the same card the tool produces. */
+export function WolframShowCommandCard({ node, sessionId }: CommandProps) {
+  const outcome = node.outcome
+  const args = (node.args ?? '').trim()
+  let payload: (ShowMeta & { expression?: string, opened?: boolean }) | undefined
+  if (outcome?.kind === 'success' && typeof outcome.text === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(outcome.text)
+      if (isRecord(parsed) && parsed.dsh === 'wolfram-show') {
+        const meta = showMetaOf({ kind: 'tool-result', meta: parsed } as unknown as Block)
+        if (meta !== undefined) payload = { ...meta, expression: typeof parsed.expression === 'string' ? parsed.expression : undefined }
+      }
+    } catch { /* not our payload; fall through to text */ }
+  }
+  const state: RowState = outcome === null ? 'running' : outcome.kind === 'error' ? 'error' : 'ok'
+  const label = payload?.label ?? firstLine(payload?.expression ?? args)
+  const size = payload?.points && payload.scale ? `${payload.points.width}×${payload.points.height} pt @${payload.scale}x` : ''
+  const summary = [payload?.kernelId, state === 'running' ? 'rendering…' : size, payload?.manipulate ? 'interactive' : ''].filter(Boolean).join(' · ')
+  return (
+    <KernelRow title={`/wolfram-show${label ? `: ${label}` : ''}`} summary={summary} state={state} defaultOpen={state !== 'running'}>
+      {state === 'running' && <pre style={PRE_STYLE}>{args}</pre>}
+      {state === 'error' && <pre style={PRE_STYLE}>{outcome?.text ?? 'failed'}</pre>}
+      {state === 'ok' && payload !== undefined && (
+        <>
+          <ShowBody sessionId={String(sessionId)} meta={payload} alt={label} />
+          <ShowCaption label={label} path={payload.path ?? undefined} />
+        </>
+      )}
+      {state === 'ok' && payload === undefined && <pre style={PRE_STYLE}>{outcome?.text ?? ''}</pre>}
+    </KernelRow>
+  )
+}
+
+/** Plain text card for /wolfram and /wolfram-kernels. */
+export function WolframCommandCard({ node }: CommandProps) {
+  const outcome = node.outcome
+  const state: RowState = outcome === null ? 'running' : outcome.kind === 'error' ? 'error' : 'ok'
+  const args = (node.args ?? '').trim()
+  const kernelId = /\[(wl:\d+:\d+)\]/.exec(outcome?.text ?? '')?.[1]
+  const output = (outcome?.text ?? '').replace(/^Opened kernel [^\n]*\n?/, '').replace(/^\[wl:\d+:\d+\]\n?/, '')
+  return (
+    <KernelRow title={`/${node.name ?? 'wolfram'}`} summary={[kernelId, state === 'running' ? 'evaluating…' : firstLine(args)].filter(Boolean).join(' · ')} state={state} defaultOpen>
+      {args !== '' && <pre style={PRE_STYLE}>{args}</pre>}
+      {state !== 'running' && output !== '' && <pre style={{ ...PRE_STYLE, opacity: 0.85, borderLeft: '2px solid color-mix(in srgb, currentColor 20%, transparent)', paddingLeft: 8 }}>{output}</pre>}
     </KernelRow>
   )
 }
@@ -612,12 +684,12 @@ function selectShown(owner: TurnTailOwnerProps): readonly ShownImage[] | null {
 }
 
 type GalleryInjected = { sessionId: string }
-type GalleryProps = Pick<TurnTailOwnerProps, 'openFile'> & { matched: readonly ShownImage[] } & InjectFace<GalleryInjected>
+type GalleryProps = { matched: readonly ShownImage[] } & InjectFace<GalleryInjected>
 
 const GALLERY_STYLE: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start', padding: '4px 0 8px' }
 
 /** The turn's shown images, pinned under the final answer (never folded away). */
-function ShownGallery({ matched, sessionId, openFile }: GalleryProps) {
+function ShownGallery({ matched, sessionId }: GalleryProps) {
   return (
     <div style={GALLERY_STYLE} data-wolfram-shown={matched.length}>
       {matched.map((item) => (
@@ -625,7 +697,7 @@ function ShownGallery({ matched, sessionId, openFile }: GalleryProps) {
           {item.meta.manipulate !== undefined && item.meta.kernelId !== undefined
             ? <ManipulateWidget sessionId={sessionId} kernelId={item.meta.kernelId} descriptor={item.meta.manipulate} initialUrl={shownImageUrl(sessionId, item.meta.attachment)} image={item.meta.attachment} scale={item.meta.scale ?? 2} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />
             : <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />}
-          <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} openFile={openFile} />
+          <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} />
         </figure>
       ))}
     </div>
@@ -648,6 +720,11 @@ export function apply(ctx: Context): void {
 
   // The callback returns the registrations' disposers so they unwind with the
   // slot owner (and re-register when it is mounted again).
+  ctx.slots.inject('conversation.chat.commandview', () => [
+    ctx.slots.register({ name: 'conversation.chat.commandview', key: 'wolfram-show' }, WolframShowCommandCard),
+    ctx.slots.register({ name: 'conversation.chat.commandview', key: 'wolfram' }, WolframCommandCard),
+    ctx.slots.register({ name: 'conversation.chat.commandview', key: 'wolfram-kernels' }, WolframCommandCard),
+  ])
   ctx.slots.inject('tool.call.toolview', () => [
     ctx.slots.register({ name: 'tool.call.toolview', key: 'wolfram_show' }, WolframShowRow),
     ctx.slots.register({ name: 'tool.call.toolview', key: 'wolfram_eval' }, WolframEvalRow),

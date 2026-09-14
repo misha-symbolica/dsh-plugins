@@ -109,15 +109,7 @@ export function createTools(deps, fallbackAgent) {
 
   const agentOf = (exec) => exec.agent ?? fallbackAgent
   const cwdOf = (agent) => agent?.session?.header?.cwd ?? process.cwd()
-  const showDir = () => config.showDirectory.replace(/^~(?=\/|$)/, homedir())
-
-  async function writeShowFile(bytes, scale) {
-    const dir = showDir()
-    await mkdir(dir, { recursive: true })
-    const path = join(dir, showFileName(bytes, scale))
-    await writeFile(path, bytes)
-    return path
-  }
+  const { writeShowFile } = createShowCore(deps)
 
   /** Model-gated admission of evaluator images; unadmitted ones are written to disk instead. */
   async function admitAll(exec, images, prefix) {
@@ -254,9 +246,11 @@ export function createTools(deps, fallbackAgent) {
     finalizeContent: finalizeImages,
   }))
 
+  const showCore = createShowCore(deps)
+
   tools.push(defineTool({
     name: 'wolfram_show',
-    description: 'Render a Wolfram Language expression (plot, graphic, grid, typeset formula, image, Style[…]) at retina resolution and SHOW IT TO THE USER inline in the chat. A top-level Manipulate[body, {x, 0, 1}, {c, {a, b}}, …] with simple control specs becomes an INTERACTIVE widget with native controls the user can drive (re-rendered in this kernel on release). Evaluated in this chat\'s kernel so it can use variables you defined with wolfram_eval. The image is displayed to the user directly by the GUI; you receive one line of metadata and the PNG path. Do NOT call read_image or wolfram_show again on the result — it is already visible. Graphics follow the GUI\'s light/dark appearance automatically (the kernel\'s front end is pinned to it). Set see:true only when YOU need to inspect the rendering too (costs image tokens).',
+    description: 'Render a Wolfram Language expression (plot, graphic, grid, typeset formula, image, Style[…]) at retina resolution and SHOW IT TO THE USER inline in the chat. A top-level Manipulate[body, {x, 0, 1}, {c, {a, b}}, …] with simple control specs becomes an INTERACTIVE widget with native controls the user can drive (re-rendered in this kernel on release). Evaluated in this chat\'s kernel so it can use variables you defined with wolfram_eval. The image is displayed to the user directly by the GUI; you receive one line of metadata and the PNG path. Do NOT call read_image or wolfram_show again on the result — it is already visible. Graphics follow the GUI\'s light/dark appearance automatically (the kernel\'s front end is pinned to it). Set see:true only when YOU need to inspect the rendering too (costs image tokens). The user can also do this without you: /wolfram-show <expression>.',
     parameters: {
       expression: { type: 'string', required: true, description: 'Expression to render, e.g. Plot[Sin[x], {x, 0, 2 Pi}] or Grid[data, Frame -> All]. Multiple statements allowed; the last one is rendered.' },
       kernelId: KERNEL_ID,
@@ -270,46 +264,16 @@ export function createTools(deps, fallbackAgent) {
       schema: { type: 'object', additionalProperties: true },
       render: (_args, v) => [{ type: 'text', text: tagged(v, `displayed ${v.label || 'image'}: ${v.devicePixels.width}x${v.devicePixels.height} px = ${v.points.width}x${v.points.height} pt (@${v.scale}x)${v.path ? `, ${v.path}` : ''}. ${v.attachment !== null ? 'Shown to the user inline already; do not call read_image or wolfram_show on it again.' : `Not shown inline (${v.inlineUnavailable}); the PNG is on disk at the path above.`}${v.see && v.attachment !== null ? ' Image attached below for you.' : ''}${v.manipulate ? ` Interactive: ${v.manipulate.controls.map(c => `${c.name} (${c.type})`).join(', ')} — the user can drive the controls in the chat; the kernel keeps the definition while it runs.` : ''}`) }],
       // Card metadata the client renders; never part of the model-visible content.
-      presentationMeta: (_args, v) => ({ attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate }),
+      presentationMeta: (_args, v) => showPresentation(v),
     },
     async execute(args, exec) {
-      const { kernel, opened } = await sessions.resolve(agentOf(exec), args.kernelId)
-      const resolution = args.resolution ?? config.resolution
-      const scale = resolution / 72
-      // Background -> None: transparent PNG, so the GUI's own light/dark page shows
-      // through (a bare Graphics otherwise gets Rasterize's opaque page fill).
-      // DSHPlugin`ShowRasterizer (kernel/DSHPlugin.wl) holds the expression; a top-level
-      // Manipulate is registered under `showId` and described on a
-      // "DSH-MANIPULATE:" Print line that the GUI turns into native controls.
-      const background = args.background === 'opaque' ? 'Automatic' : 'None'
-      const showId = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
-      const code = `DSHPlugin\`ShowRasterizer[${JSON.stringify(showId)}, (\n${args.expression}\n), "Resolution" -> ${resolution}, "Background" -> ${background}]`
-      const evaluated = await evaluate(kernel, code, { timeConstraint: args.timeConstraint })
-      const { images } = evaluated
-      const manipulate = parseManipulate(evaluated.text)
-      const text = evaluated.text.replace(/^.*DSH-MANIPULATE:.*$/m, '').trim()
-      if (manipulate !== undefined) kernel.manipulates.set(showId, { descriptor: manipulate, scale })
-      const image = images.find(i => i.mediaType === 'image/png') ?? images[0]
-      if (image === undefined) throw new Error(`wolfram_show produced no image. Kernel output:\n${text || '(empty)'}`)
-      const size = pngSize(image.data) ?? { width: 0, height: 0 }
-      const points = { width: Math.round(size.width / scale), height: Math.round(size.height / scale) }
-      const path = config.writeFiles ? await writeShowFile(image.data, scale) : undefined
-      const stored = await storeImage(image.data, path !== undefined ? basename(path) : 'wolfram-show.png')
-      const value = {
-        kernelId: kernel.id, opened, startupMs: kernel.startupMs,
-        attachment: stored.ref !== undefined ? cleanRef(stored.ref) : null,
-        devicePixels: size, points, scale, resolution, bytes: image.data.byteLength,
-        see: args.see === true, label: args.label ?? '', theme: themeOf(kernel),
-        manipulate: manipulate ?? null,
-        ...(path !== undefined ? { path } : {}),
-        ...(stored.ref === undefined ? { inlineUnavailable: stored.reason ?? 'attachment store unavailable' } : {}),
-      }
-      if (args.see === true && stored.ref !== undefined) {
-        const admitted = await admitImage(exec, image.data, basename(path ?? 'wolfram-show.png'), 'image/png')
+      const value = await showCore.show(agentOf(exec), args)
+      if (args.see === true && value.attachment !== null && value.pngBytes !== undefined) {
+        const admitted = await admitImage(exec, value.pngBytes, basename(value.path ?? 'wolfram-show.png'), 'image/png')
         if (admitted.ref !== undefined) pending.set(exec, [admitted.ref])
         else value.seeUnavailable = admitted.reason
       }
-      trace({ event: 'show', kernelId: kernel.id, px: size, pt: points, path: path ?? null })
+      delete value.pngBytes
       return value
     },
     finalizeContent: finalizeImages,
@@ -342,6 +306,72 @@ export function createTools(deps, fallbackAgent) {
   }))
 
   return tools
+}
+
+
+/** The presentation payload shared by the wolfram_show card meta and the /wolfram-show command result. */
+export function showPresentation(v) {
+  return { attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate }
+}
+
+/**
+ * The wolfram_show core, independent of the tool DSL so the /wolfram-show slash
+ * command (no model involved) produces the identical result and card.
+ * @param {object} deps - same bag as createTools (sessions, storeImage, config, themeOf, trace).
+ */
+export function createShowCore(deps) {
+  const { sessions, storeImage, config, trace, themeOf } = deps
+  const showDir = () => config.showDirectory.replace(/^~(?=\/|$)/, homedir())
+
+  async function writeShowFile(bytes, scale) {
+    const dir = showDir()
+    await mkdir(dir, { recursive: true })
+    const path = join(dir, showFileName(bytes, scale))
+    await writeFile(path, bytes)
+    return path
+  }
+
+  /**
+   * @param {object} agent - the calling agent (its session's kernels).
+   * @param {{ expression: string, kernelId?: string|null, resolution?: number, background?: string, label?: string, timeConstraint?: number }} args
+   * @returns {Promise<object>} the canonical show value (plus `pngBytes`, which the caller strips).
+   */
+  async function show(agent, args) {
+    const { kernel, opened } = await sessions.resolve(agent, args.kernelId)
+    const resolution = args.resolution ?? config.resolution
+    const scale = resolution / 72
+    // Background -> None: transparent PNG, so the GUI's own light/dark page shows
+    // through (a bare Graphics otherwise gets Rasterize's opaque page fill).
+    // DSHPlugin`ShowRasterizer (kernel/DSHPlugin.wl) holds the expression; a
+    // top-level Manipulate is registered under `showId` and described on a
+    // "DSH-MANIPULATE:" Print line that the GUI turns into native controls.
+    const background = args.background === 'opaque' ? 'Automatic' : 'None'
+    const showId = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+    const code = `DSHPlugin\`ShowRasterizer[${JSON.stringify(showId)}, (\n${args.expression}\n), "Resolution" -> ${resolution}, "Background" -> ${background}]`
+    const evaluated = await evaluate(kernel, code, { timeConstraint: args.timeConstraint })
+    const manipulate = parseManipulate(evaluated.text)
+    const text = evaluated.text.replace(/^.*DSH-MANIPULATE:.*$/m, '').trim()
+    if (manipulate !== undefined) kernel.manipulates.set(showId, { descriptor: manipulate, scale })
+    const image = evaluated.images.find(i => i.mediaType === 'image/png') ?? evaluated.images[0]
+    if (image === undefined) throw new Error(`wolfram_show produced no image. Kernel output:\n${text || '(empty)'}`)
+    const size = pngSize(image.data) ?? { width: 0, height: 0 }
+    const points = { width: Math.round(size.width / scale), height: Math.round(size.height / scale) }
+    const path = config.writeFiles ? await writeShowFile(image.data, scale) : undefined
+    const stored = await storeImage(image.data, path !== undefined ? basename(path) : 'wolfram-show.png')
+    trace({ event: 'show', kernelId: kernel.id, px: size, pt: points, path: path ?? null, manipulate: manipulate?.id ?? null })
+    return {
+      kernelId: kernel.id, opened, startupMs: kernel.startupMs,
+      attachment: stored.ref !== undefined ? cleanRef(stored.ref) : null,
+      devicePixels: size, points, scale, resolution, bytes: image.data.byteLength,
+      see: args.see === true, label: args.label ?? '', theme: themeOf(kernel),
+      manipulate: manipulate ?? null,
+      ...(path !== undefined ? { path } : {}),
+      ...(stored.ref === undefined ? { inlineUnavailable: stored.reason ?? 'attachment store unavailable' } : {}),
+      pngBytes: image.data,
+    }
+  }
+
+  return { show, writeShowFile }
 }
 
 /** Text table for wolfram_kernel_list. */
