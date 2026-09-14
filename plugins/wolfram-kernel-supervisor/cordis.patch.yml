@@ -1,0 +1,8 @@
+# Bundle patch (used when installed with `dsh plugin --profile <name> add`).
+# Defaults: Mathematica at /Applications/Wolfram.app, highest installed
+# Wolfram/AgentTools paclet, retina (144 dpi) show images written to
+# ~/Library/Wolfram/AgentToolsShow. Override `config` in the profile's
+# cordis.patch.yml (a later layer replaces the whole value).
+- insert:
+    - id: tali-wolfram-kernel-supervisor
+      name: tali-wolfram-kernel-supervisor

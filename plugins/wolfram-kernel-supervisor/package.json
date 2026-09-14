@@ -1,0 +1,44 @@
+{
+  "name": "tali-wolfram-kernel-supervisor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH plugin: per-chat Wolfram Language kernels (wl:<session>:<kernel>) driven through Mathematica's own AgentTools MCP server; wolfram_eval / wolfram_run / wolfram_show (inline retina plots) / wolfram_kernel_* lifecycle tools.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "kernels.mjs", "tools.mjs", "servers.mjs", "lib/client.js", "lib/client.js.map", "cordis.patch.yml"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web" }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "check": "node --check index.js && node --check kernels.mjs && node --check tools.mjs && node --check servers.mjs && node scripts/smoke-config.mjs",
+    "live:kernels": "node scripts/live-kernels-test.mjs",
+    "prepare": "node build.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "link:/Users/tali/github/deepseek-harness/packages/core/tools",
+    "@deepseek-ai/schemastery": "link:/Users/tali/github/deepseek-harness/vendor/schemastery",
+    "@modelcontextprotocol/sdk": "link:/Users/tali/github/deepseek-harness/node_modules/.pnpm/@modelcontextprotocol+sdk@1.29.0_zod@4.4.3/node_modules/@modelcontextprotocol/sdk"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:/Users/tali/github/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-client-ui-chat": "link:/Users/tali/github/deepseek-harness/packages/client/ui-chat",
+    "@deepseek-ai/dsh-client-ui-conversation": "link:/Users/tali/github/deepseek-harness/packages/client/ui-conversation",
+    "@deepseek-ai/dsh-client-ui-primitives": "link:/Users/tali/github/deepseek-harness/packages/client/ui-primitives",
+    "@deepseek-ai/dsh-client-ui-renderer": "link:/Users/tali/github/deepseek-harness/packages/client/ui-renderer",
+    "@deepseek-ai/dsh-client-ui-session": "link:/Users/tali/github/deepseek-harness/packages/client/ui-session",
+    "@deepseek-ai/dsh-client-ui-slots": "link:/Users/tali/github/deepseek-harness/packages/client/ui-slots",
+    "@deepseek-ai/dsh-client-ui-tool": "link:/Users/tali/github/deepseek-harness/packages/client/ui-tool",
+    "@types/react": "~18.3.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.2"
+  }
+}
