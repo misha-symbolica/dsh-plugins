@@ -347,7 +347,7 @@ export function createTools(deps, fallbackAgent) {
 
 /** The presentation payload shared by the wolfram_show card meta and the /wolfram-show command result. */
 export function showPresentation(v) {
-  return { attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate, timing: v.timing ?? null, errorImage: v.errorImage === true }
+  return { attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, sourcePath: v.sourcePath ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate, timing: v.timing ?? null, errorImage: v.errorImage === true }
 }
 
 /**
@@ -398,6 +398,8 @@ export function createShowCore(deps) {
     const size = pngSize(image.data) ?? { width: 0, height: 0 }
     const points = { width: Math.round(size.width / scale), height: Math.round(size.height / scale) }
     const path = config.writeFiles ? await writeShowFile(image.data, scale) : undefined
+    // The source next to the PNG (same stem, .wl): what was sent to be rasterized, with a header comment.
+    const sourcePath = path !== undefined ? await writeSourceFile(path, args.expression, kernel.id, agent) : undefined
     const stored = await storeImage(image.data, path !== undefined ? basename(path) : 'wolfram-show.png')
     trace({ event: 'show', kernelId: kernel.id, px: size, pt: points, path: path ?? null, manipulate: manipulate?.id ?? null, timing })
     return {
@@ -408,9 +410,19 @@ export function createShowCore(deps) {
       manipulate: manipulate ?? null,
       timing, errorImage: report?.errorImage === true, messages: report?.messages ?? [],
       ...(path !== undefined ? { path } : {}),
+      ...(sourcePath !== undefined ? { sourcePath } : {}),
       ...(stored.ref === undefined ? { inlineUnavailable: stored.reason ?? 'attachment store unavailable' } : {}),
       pngBytes: image.data,
     }
+  }
+
+  /** `<stem>.wl` beside `<stem>@2x.png`: header comment + the expression exactly as submitted. */
+  async function writeSourceFile(pngPath, expression, kernelId, agent) {
+    const path = pngPath.replace(/(@[\d.]+x)?\.png$/, '.wl')
+    const when = new Date().toISOString()
+    const header = `(* wolfram_show · ${when} · kernel ${kernelId} · DSH session ${agent?.id ?? '?'} · image ${basename(pngPath)} *)\n`
+    await writeFile(path, header + expression.trim() + '\n')
+    return path
   }
 
   return { show, writeShowFile }

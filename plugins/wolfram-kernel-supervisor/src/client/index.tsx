@@ -355,8 +355,8 @@ function timingLabel(t: ShowTiming | undefined): string {
  * under LIVE_THRESHOLD_MS, dragging previews continuously (debounced to
  * LIVE_INTERVAL_MS); a slow render switches live mode off again until a fast one.
  */
-function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, scale, alt, path, timing }: {
-  sessionId: string, kernelId: string, descriptor: ManipulateDescriptor, initialUrl: string, image: ImageRef, scale: number, alt: string, path: string | undefined, timing: ShowTiming | undefined,
+function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, scale, alt, path, timing, sourcePath }: {
+  sessionId: string, kernelId: string, descriptor: ManipulateDescriptor, initialUrl: string, image: ImageRef, scale: number, alt: string, path: string | undefined, timing: ShowTiming | undefined, sourcePath: string | undefined,
 }) {
   const [values, setValues] = useState<ControlValue[]>(() => descriptor.controls.map(c => c.init))
   const [src, setSrc] = useState(initialUrl)
@@ -506,7 +506,7 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
       <div style={{ ...IMAGE_FRAME, background: frame.color ?? 'transparent', opacity: busy && !live ? 0.75 : 1, transition: 'opacity 120ms' }}>
         <img src={src} alt={alt} title={alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} onLoad={frame.onLoad} />
       </div>
-      <StatusRow timing={lastTiming} live={live} onOpen={dead === undefined ? () => { void openCurrent() } : undefined} opening={opening} />
+      <StatusRow timing={lastTiming} live={live} onOpen={dead === undefined ? () => { void openCurrent() } : undefined} opening={opening} sourcePath={sourcePath} />
       {problem !== undefined && <pre style={{ ...PRE_STYLE, fontSize: 11, opacity: 0.8 }}>{problem}</pre>}
       {dead !== undefined && <div style={{ fontSize: 12, opacity: 0.7 }}>controls disabled — {dead}</div>}
     </div>
@@ -522,18 +522,27 @@ const PICTURE = (
   </svg>
 )
 
-/** Status line under a live frame: timings, live tag, and the open-in-viewer icon. */
-function StatusRow({ timing, live, onOpen, opening }: { timing: ShowTiming | undefined, live: boolean, onOpen: (() => void) | undefined, opening: boolean }) {
+/** Small document glyph for "open the .wl source". */
+const DOCUMENT = (
+  <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden style={{ display: 'block' }}>
+    <path d="M3.5 1.5h6l3 3v10h-9z" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    <path d="M9.5 1.5v3h3" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    <path d="M5.5 8h5M5.5 10.5h5M5.5 13h3" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+  </svg>
+)
+
+const ICON_BUTTON = (busy: boolean): CSSProperties => ({ all: 'unset', cursor: busy ? 'progress' : 'pointer', display: 'inline-flex', opacity: busy ? 0.5 : 1 })
+
+/** Status line under a frame: timings, live tag, and the open-image / open-source icons. */
+function StatusRow({ timing, live, onOpen, opening, sourcePath }: { timing: ShowTiming | undefined, live: boolean, onOpen: (() => void) | undefined, opening: boolean, sourcePath: string | undefined }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, opacity: 0.6, fontVariantNumeric: 'tabular-nums' }}>
       <span>{timingLabel(timing)}{live ? ' · live' : ''}</span>
       {onOpen !== undefined && (
-        <button
-          type="button" title="Open this frame in the image viewer" onClick={onOpen} disabled={opening}
-          style={{ all: 'unset', cursor: opening ? 'progress' : 'pointer', display: 'inline-flex', opacity: opening ? 0.5 : 1 }}
-        >
-          {PICTURE}
-        </button>
+        <button type="button" title="Open this frame in the image viewer" onClick={onOpen} disabled={opening} style={ICON_BUTTON(opening)}>{PICTURE}</button>
+      )}
+      {sourcePath !== undefined && (
+        <button type="button" title={`Open the source (${sourcePath})`} onClick={() => openShown(sourcePath)} style={ICON_BUTTON(false)}>{DOCUMENT}</button>
       )}
     </div>
   )
@@ -657,6 +666,7 @@ interface ShowMeta {
   devicePixels?: { width: number, height: number }
   scale?: number
   path?: string | null
+  sourcePath?: string | null
   label?: string | null
   kernelId?: string
 }
@@ -672,6 +682,7 @@ function showMetaOf(block: Block): ShowMeta | undefined {
     devicePixels: dims(meta.devicePixels),
     scale: typeof meta.scale === 'number' ? meta.scale : undefined,
     path: typeof meta.path === 'string' ? meta.path : null,
+    sourcePath: typeof meta.sourcePath === 'string' ? meta.sourcePath : null,
     label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
     kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
     manipulate: asManipulate(meta.manipulate),
@@ -714,10 +725,10 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
       ? (
         <>
           {meta?.manipulate !== undefined && meta.attachment !== null && meta.kernelId !== undefined
-            ? <ManipulateWidget sessionId={String(sessionId)} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(String(sessionId), meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={label} path={meta.path ?? undefined} timing={meta.timing} />
+            ? <ManipulateWidget sessionId={String(sessionId)} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(String(sessionId), meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={label} path={meta.path ?? undefined} timing={meta.timing} sourcePath={meta.sourcePath ?? undefined} />
             : <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />}
           {meta?.manipulate === undefined && <ShowCaption label={label} path={meta?.path ?? undefined} />}
-          {meta?.manipulate === undefined && meta?.timing && <StatusRow timing={meta.timing} live={false} onOpen={undefined} opening={false} />}
+          {meta?.manipulate === undefined && <StatusRow timing={meta?.timing} live={false} onOpen={meta?.path ? () => openShown(meta.path as string) : undefined} opening={false} sourcePath={meta?.sourcePath ?? undefined} />}
           {meta?.errorImage && <div style={{ fontSize: 12, opacity: 0.8 }}>⚠ the rendering contains an error box</div>}
           <details style={{ fontSize: 12, opacity: 0.7 }}>
             <summary>expression</summary>
@@ -738,7 +749,7 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
 function ShowBody({ sessionId, meta, alt }: { sessionId: string, meta: ShowMeta, alt: string }) {
   if (meta.attachment === null) return <div style={{ fontSize: 12, opacity: 0.7 }}>[image unavailable{meta.path ? `: ${meta.path}` : ''}]</div>
   return meta.manipulate !== undefined && meta.kernelId !== undefined
-    ? <ManipulateWidget sessionId={sessionId} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(sessionId, meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={alt} path={meta.path ?? undefined} timing={meta.timing} />
+    ? <ManipulateWidget sessionId={sessionId} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(sessionId, meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={alt} path={meta.path ?? undefined} timing={meta.timing} sourcePath={meta.sourcePath ?? undefined} />
     : <WolframImage source={{ url: shownImageUrl(sessionId, meta.attachment) }} image={meta.attachment} pointWidth={meta.points?.width} alt={alt} path={meta.path ?? undefined} />
 }
 
@@ -854,6 +865,7 @@ function shownFromMeta(meta: unknown): (ShowMeta & { attachment: ImageRef }) | u
     devicePixels: dims(meta.devicePixels),
     scale: typeof meta.scale === 'number' ? meta.scale : undefined,
     path: typeof meta.path === 'string' ? meta.path : null,
+    sourcePath: typeof meta.sourcePath === 'string' ? meta.sourcePath : null,
     label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
     kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
     manipulate: asManipulate(meta.manipulate),
@@ -920,7 +932,7 @@ function ShownGallery({ matched, sessionId }: GalleryProps) {
       {matched.map((item) => (
         <figure key={item.callId} style={{ margin: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
           {item.meta.manipulate !== undefined && item.meta.kernelId !== undefined
-            ? <ManipulateWidget sessionId={sessionId} kernelId={item.meta.kernelId} descriptor={item.meta.manipulate} initialUrl={shownImageUrl(sessionId, item.meta.attachment)} image={item.meta.attachment} scale={item.meta.scale ?? 2} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} timing={item.meta.timing} />
+            ? <ManipulateWidget sessionId={sessionId} kernelId={item.meta.kernelId} descriptor={item.meta.manipulate} initialUrl={shownImageUrl(sessionId, item.meta.attachment)} image={item.meta.attachment} scale={item.meta.scale ?? 2} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} timing={item.meta.timing} sourcePath={item.meta.sourcePath ?? undefined} />
             : <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />}
           {item.meta.manipulate === undefined && <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} />}
         </figure>

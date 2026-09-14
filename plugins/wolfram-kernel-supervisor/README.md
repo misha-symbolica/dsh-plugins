@@ -85,9 +85,12 @@ The host adds the round-trip time; the card shows `eval · raster · round trip`
 absorbed by the throttle). A slow render or a 422 (body failed for those values —
 the last frame is kept and the messages shown) switches live off until a fast
 render happens again. The status row under the frame shows `eval · raster ·
-round trip` (+ `live`) and a picture icon: click → the current values are rendered
-once more with `&save=1` (a PNG in the show directory) and opened in the system
-viewer. Layout follows Mathematica: controls above the frame, status below; no
+round trip` (+ `live`) and two icons: a picture (click → the current values are
+rendered once more with `&save=1`, a PNG in the show directory, and opened in the
+system viewer) and a document (opens the `.wl` source that every show writes
+beside its PNG — same timestamp+hash stem, a header comment with time / kernel /
+session / image name, then the expression exactly as submitted). Static shows
+get the same two icons (their PNG already exists). Layout follows Mathematica: controls above the frame, status below; no
 caption link for interactive graphics. The rounded frame pads the raster by 8 px
 (no clipping into the image) and fills the padding with the median colour of the
 raster's one-pixel border ring (canvas sample on load) — transparent for the

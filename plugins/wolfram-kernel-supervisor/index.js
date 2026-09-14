@@ -415,7 +415,7 @@ export function apply(ctx, config) {
     },
   }), 'wolfram-kernel-supervisor: /wolfram-kernels')
 
-  /** GET /api/wolfram/open?path=… — reveal a PNG this plugin wrote in the system viewer (paths under showDirectory only). */
+  /** GET /api/wolfram/open?path=… — open a PNG or .wl this plugin wrote with the system default app (paths under showDirectory only). */
   ctx.connection.fetch.register({
     path: OPEN_PATH,
     methods: ['GET', 'HEAD'],
@@ -423,7 +423,7 @@ export function apply(ctx, config) {
       const raw = new URL(request.url).searchParams.get('path') ?? ''
       const path = resolvePath(raw)
       const root = showDirectory()
-      if (raw === '' || !(path === root || path.startsWith(root + sep)) || !path.endsWith('.png')) return new Response('not a wolfram_show image path', { status: 403 })
+      if (raw === '' || !(path === root || path.startsWith(root + sep)) || !/\.(png|wl)$/.test(path)) return new Response('not a wolfram_show image or source path', { status: 403 })
       if (request.method === 'HEAD') return new Response(null, { status: 200 })
       const opener = process.platform === 'darwin' ? 'open' : 'xdg-open'
       await new Promise((done) => execFile(opener, [path], () => done()))
