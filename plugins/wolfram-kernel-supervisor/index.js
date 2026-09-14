@@ -68,7 +68,7 @@ import { resolve as resolvePath, sep } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { KernelSessions, evaluate } from './kernels.mjs'
 import { findAgentToolsDirectory, findKernel, kernelLaunch } from './servers.mjs'
-import { createShowCore, createTools, pngSize, showPresentation } from './tools.mjs'
+import { createShowCore, createTools, parseShowReport, pngSize, showPresentation, stripReports } from './tools.mjs'
 
 export const name = 'wolfram-kernel-supervisor'
 
@@ -330,19 +330,28 @@ export function apply(ctx, config) {
       const list = wolframValues(entry.descriptor, values)
       if (list === undefined) return new Response('values do not match the controls', { status: 400 })
       let result
+      const t0 = Date.now()
       try {
         result = await evaluate(kernel, `DSHPlugin\`Render[${JSON.stringify(id)}, ${list}]`)
       } catch (error) {
         return new Response(`render failed: ${error instanceof Error ? error.message : String(error)}`, { status: 500 })
       }
+      const totalMs = Date.now() - t0
+      const report = parseShowReport(result.text)
+      if (report !== undefined && !report.ok) {
+        // 422: the body failed for these values (messages / timeout); the widget keeps its last frame and shows why.
+        return new Response(JSON.stringify({ error: report.error, messages: report.messages, timedOut: report.timedOut }), { status: 422, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
+      }
       const image = result.images.find(i => i.mediaType === 'image/png') ?? result.images[0]
-      if (image === undefined) return new Response(`render produced no image: ${result.text.slice(0, 500)}`, { status: 500 })
+      if (image === undefined) return new Response(`render produced no image: ${stripReports(result.text).slice(0, 500)}`, { status: 500 })
       const size = pngSize(image.data)
       const headers = {
         'content-type': image.mediaType, 'content-length': String(image.data.byteLength), 'cache-control': 'no-store',
         'x-wolfram-scale': String(entry.scale), ...(size ? { 'x-wolfram-width': String(size.width), 'x-wolfram-height': String(size.height) } : {}),
+        'x-wolfram-eval-ms': String(report?.evalMs ?? ''), 'x-wolfram-raster-ms': String(report?.rasterMs ?? ''), 'x-wolfram-kernel-ms': String(report?.kernelMs ?? ''), 'x-wolfram-total-ms': String(totalMs),
+        'x-wolfram-error-image': report?.errorImage ? '1' : '0',
       }
-      trace({ event: 'manipulate-render', kernelId, id, values })
+      trace({ event: 'manipulate-render', kernelId, id, values, evalMs: report?.evalMs ?? null, rasterMs: report?.rasterMs ?? null, totalMs })
       if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
       return new Response(image.data, { status: 200, headers })
     },

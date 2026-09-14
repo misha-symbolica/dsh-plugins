@@ -57,7 +57,25 @@ evaluated, so `{x, 0, Length[l]}` and `{n, Range[10]}` work:
 | Manipulate options (`SaveDefinitions -> True`, …) | ignored |
 
 The held body and variables are registered under an id in the kernel; the
-initial frame is rasterized; the descriptor rides `presentationMeta`. On release
+initial frame is rasterized; the descriptor rides `presentationMeta`.
+
+**Guarded rendering.** Every render (`ShowRasterizer`, `Render`) goes through
+`evalAndRasterize`: the body under `TimeConstrained` (option `"TimeLimit"`, 30 s)
++ `Check` + an `` Internal`AddHandler["Message", …] `` trap (pattern from
+CoreTools `TraceLoading`; `$MessageList` decides which trapped messages were
+actually issued, since the handler also sees internally `Quiet`ed ones), then the
+rasterization under its own `TimeConstrained`. Any message or timeout → **nothing
+is rasterized**; the failure and the message texts reach the model / the card. A
+`DSH-SHOW:{json}` line reports `evalMs`, `rasterMs`, `totalMs` (kernel), messages,
+`timedOut`, and `errorImage` (pink error-box pixels, MathTools `ErrorImageQ`).
+The host adds the round-trip time; the card shows `eval · raster · round trip`.
+
+**Live previews.** When the last render's *kernel* time (eval + raster) was under
+50 ms, dragging a slider re-renders continuously, throttled to one render per
+150 ms with a trailing frame (host round trip is a fairly constant ~80 ms on top,
+absorbed by the throttle). A slow render or a 422 (body failed for those values —
+the last frame is kept and the messages shown) switches live off until a fast
+render happens again. The footer shows `… · live` while active. On release
 the browser fetches `GET /api/wolfram/manipulate?sessionId&kernelId&id&values=[…]`;
 the host validates every value against the descriptor (sliders clamped, choice
 indices bounded, booleans) and evaluates `DSHPlugin\`Render[id, values]` — the

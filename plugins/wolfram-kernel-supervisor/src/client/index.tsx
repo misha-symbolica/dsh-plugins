@@ -254,20 +254,44 @@ function formatNumber(v: number): string {
 }
 
 /**
- * Native controls for a registered Manipulate plus the live frame. `commit`
- * fires on release/change (not on every slider pixel); renders are serialized
- * with the newest requested values replacing any queued ones.
+ * A render whose KERNEL time (evaluate + rasterize) was under this is cheap
+ * enough to preview continuously while a slider drags. The host round trip adds
+ * a fairly constant ~80 ms (MCP + base64 transfer) that the debounce absorbs.
  */
-function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, scale, alt, path }: {
-  sessionId: string, kernelId: string, descriptor: ManipulateDescriptor, initialUrl: string, image: ImageRef, scale: number, alt: string, path: string | undefined,
+const LIVE_THRESHOLD_MS = 50
+/** Throttle for live previews: at most one render per this many ms while dragging (trailing edge included). */
+const LIVE_INTERVAL_MS = 150
+
+function timingLabel(t: ShowTiming | undefined): string {
+  if (t === undefined || t.totalMs === null) return ''
+  const parts = [t.evalMs !== null ? `eval ${t.evalMs}` : null, t.rasterMs !== null ? `raster ${t.rasterMs}` : null, `round trip ${t.totalMs} ms`].filter(Boolean)
+  return parts.join(' · ')
+}
+
+/**
+ * Native controls for a registered Manipulate plus the live frame. `commit`
+ * fires on release/change; renders are serialized with the newest requested
+ * values replacing any queued ones. When the last render's host round trip was
+ * under LIVE_THRESHOLD_MS, dragging previews continuously (debounced to
+ * LIVE_INTERVAL_MS); a slow render switches live mode off again until a fast one.
+ */
+function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, scale, alt, path, timing }: {
+  sessionId: string, kernelId: string, descriptor: ManipulateDescriptor, initialUrl: string, image: ImageRef, scale: number, alt: string, path: string | undefined, timing: ShowTiming | undefined,
 }) {
   const [values, setValues] = useState<ControlValue[]>(() => descriptor.controls.map(c => c.init))
   const [src, setSrc] = useState(initialUrl)
   const [busy, setBusy] = useState(false)
   const [dead, setDead] = useState<string | undefined>(undefined)
+  const [problem, setProblem] = useState<string | undefined>(undefined)
+  const [lastTiming, setLastTiming] = useState<ShowTiming | undefined>(timing)
   const [size, setSize] = useState<{ w: number, h: number }>({ w: image.width / scale, h: image.height / scale })
   const inflight = useRef(false)
   const queued = useRef<ControlValue[] | undefined>(undefined)
+  const liveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const livePending = useRef<ControlValue[] | undefined>(undefined)
+  const liveLastAt = useRef(0)
+  const kernelMs = lastTiming === undefined ? null : lastTiming.kernelMs ?? (lastTiming.evalMs !== null && lastTiming.rasterMs !== null ? lastTiming.evalMs + lastTiming.rasterMs : null)
+  const live = dead === undefined && kernelMs !== null && kernelMs < LIVE_THRESHOLD_MS
 
   const render = useCallback(async (next: ControlValue[]) => {
     if (inflight.current) { queued.current = next; return }
@@ -277,11 +301,22 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
       const url = manipulateUrl(sessionId, kernelId, descriptor.id, next)
       const response = await fetch(url, { credentials: 'same-origin' })
       if (response.status === 410) { setDead(await response.text()); return }
+      if (response.status === 422) {
+        // The body failed for these values: keep the last frame, explain, and stop live previews.
+        let detail = ''
+        try { const j = await response.json() as { error?: string, messages?: string[] }; detail = [j.error, ...(j.messages ?? [])].filter(Boolean).join('\n') } catch { detail = 'evaluation failed' }
+        setProblem(detail)
+        setLastTiming(undefined)
+        return
+      }
       if (!response.ok) { setDead(`${response.status}: ${(await response.text()).slice(0, 200)}`); return }
       const blob = await response.blob()
       const w = Number(response.headers.get('x-wolfram-width')), h = Number(response.headers.get('x-wolfram-height'))
       const s = Number(response.headers.get('x-wolfram-scale')) || scale
+      const n = (name: string) => { const v = Number(response.headers.get(name)); return Number.isFinite(v) && response.headers.get(name) !== '' ? v : null }
       if (w > 0 && h > 0) setSize({ w: w / s, h: h / s })
+      setLastTiming({ evalMs: n('x-wolfram-eval-ms'), rasterMs: n('x-wolfram-raster-ms'), kernelMs: n('x-wolfram-kernel-ms'), totalMs: n('x-wolfram-total-ms') })
+      setProblem(response.headers.get('x-wolfram-error-image') === '1' ? 'the rendering contains an error box' : undefined)
       setSrc(prev => { if (prev.startsWith('blob:')) URL.revokeObjectURL(prev); return URL.createObjectURL(blob) })
     } catch (error) {
       setDead(String(error))
@@ -294,18 +329,43 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
     }
   }, [sessionId, kernelId, descriptor.id, scale])
 
+  useEffect(() => () => { if (liveTimer.current !== undefined) clearTimeout(liveTimer.current) }, [])
+
+  /** Final value (release / change): render now. */
   const commit = (index: number, v: ControlValue) => {
+    if (liveTimer.current !== undefined) { clearTimeout(liveTimer.current); liveTimer.current = undefined }
+    livePending.current = undefined
     const next = values.map((old, i) => (i === index ? v : old))
     setValues(next)
     void render(next)
   }
+  /**
+   * Intermediate slider value while dragging: readout always; in live mode a
+   * throttled render — at most one per LIVE_INTERVAL_MS, always with the newest
+   * values, plus a trailing render so the frame never lags the thumb.
+   */
+  const preview = (index: number, v: number) => {
+    const next = values.map((old, i) => (i === index ? v : old))
+    setValues(next)
+    if (!live) return
+    livePending.current = next
+    if (liveTimer.current !== undefined) return
+    const wait = Math.max(0, LIVE_INTERVAL_MS - (Date.now() - liveLastAt.current))
+    liveTimer.current = setTimeout(() => {
+      liveTimer.current = undefined
+      liveLastAt.current = Date.now()
+      const pending = livePending.current
+      livePending.current = undefined
+      if (pending !== undefined) void render(pending)
+    }, wait)
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start', maxWidth: '100%' }}>
-      <div style={{ ...IMAGE_FRAME, opacity: busy ? 0.75 : 1, transition: 'opacity 120ms' }}>
+      <div style={{ ...IMAGE_FRAME, opacity: busy && !live ? 0.75 : 1, transition: 'opacity 120ms' }}>
         <img src={src} alt={alt} title={path ?? alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} />
       </div>
-      <div style={CONTROLS_STYLE} data-wolfram-manipulate={descriptor.id}>
+      <div style={CONTROLS_STYLE} data-wolfram-manipulate={descriptor.id} data-live={live || undefined}>
         {descriptor.controls.map((control, i) => {
           const v = values[i] as ControlValue
           const disabled = dead !== undefined
@@ -314,7 +374,7 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
               <FragmentRow key={control.name} label={control.label}>
                 <input
                   type="range" min={control.min} max={control.max} step={control.step ?? 'any'} value={v as number} disabled={disabled}
-                  onChange={(e) => { const n = Number(e.target.value); setValues(vs => vs.map((old, j) => (j === i ? n : old))) }}
+                  onChange={(e) => preview(i, Number(e.target.value))}
                   onPointerUp={(e) => commit(i, Number((e.target as HTMLInputElement).value))}
                   onKeyUp={(e) => commit(i, Number((e.target as HTMLInputElement).value))}
                   style={{ width: '100%' }}
@@ -353,6 +413,10 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
           )
         })}
       </div>
+      <div style={{ fontSize: 11, opacity: 0.55, fontVariantNumeric: 'tabular-nums' }}>
+        {timingLabel(lastTiming)}{live ? ' · live' : ''}
+      </div>
+      {problem !== undefined && <pre style={{ ...PRE_STYLE, fontSize: 11, opacity: 0.8 }}>{problem}</pre>}
       {dead !== undefined && <div style={{ fontSize: 12, opacity: 0.7 }}>controls disabled — {dead}</div>}
     </div>
   )
@@ -425,6 +489,12 @@ type ManipulateControl =
 interface ManipulateDescriptor { id: string, controls: ManipulateControl[] }
 type ControlValue = number | boolean
 
+function asTiming(value: unknown): ShowTiming | undefined {
+  if (!isRecord(value)) return undefined
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  return { evalMs: n(value.evalMs), rasterMs: n(value.rasterMs), kernelMs: n(value.kernelMs), totalMs: n(value.totalMs) }
+}
+
 /** Narrow the host's manipulate descriptor (untrusted on replay). */
 function asManipulate(value: unknown): ManipulateDescriptor | undefined {
   if (!isRecord(value) || typeof value.id !== 'string' || !Array.isArray(value.controls) || value.controls.length === 0) return undefined
@@ -443,9 +513,13 @@ function asManipulate(value: unknown): ManipulateDescriptor | undefined {
   return { id: value.id, controls }
 }
 
+interface ShowTiming { evalMs: number | null, rasterMs: number | null, kernelMs: number | null, totalMs: number | null }
+
 interface ShowMeta {
   attachment: ImageRef | null
   manipulate?: ManipulateDescriptor
+  timing?: ShowTiming
+  errorImage?: boolean
   points?: { width: number, height: number }
   devicePixels?: { width: number, height: number }
   scale?: number
@@ -468,6 +542,8 @@ function showMetaOf(block: Block): ShowMeta | undefined {
     label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
     kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
     manipulate: asManipulate(meta.manipulate),
+    timing: asTiming(meta.timing),
+    errorImage: meta.errorImage === true,
   }
 }
 
@@ -485,7 +561,7 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
   const label = meta?.label ?? firstLine(expression)
   const kernelId = meta?.kernelId ?? kernelIdOf(block)
   const size = meta?.devicePixels && meta.points ? `${meta.points.width}×${meta.points.height} pt${meta.scale && meta.scale !== 1 ? ` @${meta.scale}x` : ''}` : ''
-  const summary = [kernelId, state === 'running' ? 'rendering…' : size, meta?.manipulate !== undefined ? 'interactive' : ''].filter(Boolean).join(' · ')
+  const summary = [kernelId, state === 'running' ? 'rendering…' : size, meta?.manipulate !== undefined ? 'interactive' : '', meta?.timing?.totalMs !== null && meta?.timing?.totalMs !== undefined ? `${meta.timing.totalMs} ms` : ''].filter(Boolean).join(' · ')
   const ref = meta?.attachment ?? imageRefsOf(block)[0]
   const body = state === 'running'
     ? <pre style={PRE_STYLE}>{expression}</pre>
@@ -493,9 +569,10 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
       ? (
         <>
           {meta?.manipulate !== undefined && meta.attachment !== null && meta.kernelId !== undefined
-            ? <ManipulateWidget sessionId={String(sessionId)} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(String(sessionId), meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={label} path={meta.path ?? undefined} />
+            ? <ManipulateWidget sessionId={String(sessionId)} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(String(sessionId), meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={label} path={meta.path ?? undefined} timing={meta.timing} />
             : <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />}
           <ShowCaption label={label} path={meta?.path ?? undefined} />
+          {meta?.errorImage && <div style={{ fontSize: 12, opacity: 0.8 }}>⚠ the rendering contains an error box</div>}
           <details style={{ fontSize: 12, opacity: 0.7 }}>
             <summary>expression</summary>
             <pre style={PRE_STYLE}>{expression}</pre>
@@ -515,7 +592,7 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
 function ShowBody({ sessionId, meta, alt }: { sessionId: string, meta: ShowMeta, alt: string }) {
   if (meta.attachment === null) return <div style={{ fontSize: 12, opacity: 0.7 }}>[image unavailable{meta.path ? `: ${meta.path}` : ''}]</div>
   return meta.manipulate !== undefined && meta.kernelId !== undefined
-    ? <ManipulateWidget sessionId={sessionId} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(sessionId, meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={alt} path={meta.path ?? undefined} />
+    ? <ManipulateWidget sessionId={sessionId} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(sessionId, meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={alt} path={meta.path ?? undefined} timing={meta.timing} />
     : <WolframImage source={{ url: shownImageUrl(sessionId, meta.attachment) }} image={meta.attachment} pointWidth={meta.points?.width} alt={alt} path={meta.path ?? undefined} />
 }
 
@@ -634,6 +711,8 @@ function shownFromMeta(meta: unknown): (ShowMeta & { attachment: ImageRef }) | u
     label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
     kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
     manipulate: asManipulate(meta.manipulate),
+    timing: asTiming(meta.timing),
+    errorImage: meta.errorImage === true,
   }
 }
 
@@ -695,7 +774,7 @@ function ShownGallery({ matched, sessionId }: GalleryProps) {
       {matched.map((item) => (
         <figure key={item.callId} style={{ margin: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
           {item.meta.manipulate !== undefined && item.meta.kernelId !== undefined
-            ? <ManipulateWidget sessionId={sessionId} kernelId={item.meta.kernelId} descriptor={item.meta.manipulate} initialUrl={shownImageUrl(sessionId, item.meta.attachment)} image={item.meta.attachment} scale={item.meta.scale ?? 2} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />
+            ? <ManipulateWidget sessionId={sessionId} kernelId={item.meta.kernelId} descriptor={item.meta.manipulate} initialUrl={shownImageUrl(sessionId, item.meta.attachment)} image={item.meta.attachment} scale={item.meta.scale ?? 2} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} timing={item.meta.timing} />
             : <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />}
           <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} />
         </figure>

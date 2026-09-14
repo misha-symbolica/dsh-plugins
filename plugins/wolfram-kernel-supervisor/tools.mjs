@@ -57,6 +57,38 @@ export function showFileName(bytes, scale) {
   return `${timestamp()}-${hash}@${tag}x.png`
 }
 
+/** The `DSH-SHOW:{…}` report DSHPlugin` prints for every guarded render: ok, timings, messages. */
+export function parseShowReport(text) {
+  const match = /DSH-SHOW:(\{.*\})\s*$/m.exec(text)
+  if (match === null) return undefined
+  try {
+    const r = JSON.parse(match[1])
+    if (typeof r?.ok !== 'boolean') return undefined
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null)
+    return {
+      ok: r.ok,
+      error: typeof r.error === 'string' ? r.error : null,
+      evalMs: num(r.evalMs), rasterMs: num(r.rasterMs), kernelMs: num(r.totalMs),
+      messages: Array.isArray(r.messages) ? r.messages.filter(m => typeof m === 'string') : [],
+      timedOut: r.timedOut === true,
+      errorImage: r.errorImage === true,
+    }
+  } catch { return undefined }
+}
+
+/** Strip the plugin's report lines from model/user-visible kernel output. */
+export function stripReports(text) {
+  return text.replace(/^.*DSH-(?:SHOW|MANIPULATE):.*$/gm, '').replace(/\n{2,}/g, '\n').trim()
+}
+
+/** A kernel-side failure surfaced as an Error with the collected messages. */
+export function showFailure(report, fallbackText) {
+  const lines = [report?.error ?? 'rendering failed']
+  if (report?.messages?.length) lines.push(...report.messages.map(m => `  ${m}`))
+  else if (fallbackText) lines.push(fallbackText.slice(0, 800))
+  return new Error(lines.join('\n'))
+}
+
 /** The `DSH-MANIPULATE:{…}` descriptor DSHPlugin`ShowRasterizer prints for an interactive graphic, validated. */
 export function parseManipulate(text) {
   const match = /DSH-MANIPULATE:(\{.*\})\s*$/m.exec(text)
@@ -262,7 +294,7 @@ export function createTools(deps, fallbackAgent) {
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_args, v) => [{ type: 'text', text: tagged(v, `displayed ${v.label || 'image'}: ${v.devicePixels.width}x${v.devicePixels.height} px = ${v.points.width}x${v.points.height} pt (@${v.scale}x)${v.path ? `, ${v.path}` : ''}. ${v.attachment !== null ? 'Shown to the user inline already; do not call read_image or wolfram_show on it again.' : `Not shown inline (${v.inlineUnavailable}); the PNG is on disk at the path above.`}${v.see && v.attachment !== null ? ' Image attached below for you.' : ''}${v.manipulate ? ` Interactive: ${v.manipulate.controls.map(c => `${c.name} (${c.type})`).join(', ')} — the user can drive the controls in the chat; the kernel keeps the definition while it runs.` : ''}`) }],
+      render: (_args, v) => [{ type: 'text', text: tagged(v, `displayed ${v.label || 'image'}: ${v.devicePixels.width}x${v.devicePixels.height} px = ${v.points.width}x${v.points.height} pt (@${v.scale}x; eval ${v.timing?.evalMs ?? '?'} ms, rasterize ${v.timing?.rasterMs ?? '?'} ms, total ${v.timing?.totalMs ?? '?'} ms)${v.path ? `, ${v.path}` : ''}.${v.errorImage ? ' WARNING: the rendering contains a pink error box — the expression probably did not evaluate as intended.' : ''} ${v.attachment !== null ? 'Shown to the user inline already; do not call read_image or wolfram_show on it again.' : `Not shown inline (${v.inlineUnavailable}); the PNG is on disk at the path above.`}${v.see && v.attachment !== null ? ' Image attached below for you.' : ''}${v.manipulate ? ` Interactive: ${v.manipulate.controls.map(c => `${c.name} (${c.type})`).join(', ')} — the user can drive the controls in the chat; the kernel keeps the definition while it runs.` : ''}`) }],
       // Card metadata the client renders; never part of the model-visible content.
       presentationMeta: (_args, v) => showPresentation(v),
     },
@@ -311,7 +343,7 @@ export function createTools(deps, fallbackAgent) {
 
 /** The presentation payload shared by the wolfram_show card meta and the /wolfram-show command result. */
 export function showPresentation(v) {
-  return { attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate }
+  return { attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate, timing: v.timing ?? null, errorImage: v.errorImage === true }
 }
 
 /**
@@ -348,23 +380,29 @@ export function createShowCore(deps) {
     const background = args.background === 'opaque' ? 'Automatic' : 'None'
     const showId = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
     const code = `DSHPlugin\`ShowRasterizer[${JSON.stringify(showId)}, (\n${args.expression}\n), "Resolution" -> ${resolution}, "Background" -> ${background}]`
+    const t0 = Date.now()
     const evaluated = await evaluate(kernel, code, { timeConstraint: args.timeConstraint })
+    const totalMs = Date.now() - t0
+    const report = parseShowReport(evaluated.text)
     const manipulate = parseManipulate(evaluated.text)
-    const text = evaluated.text.replace(/^.*DSH-MANIPULATE:.*$/m, '').trim()
+    const text = stripReports(evaluated.text)
+    if (report !== undefined && !report.ok) throw showFailure(report, text)
     if (manipulate !== undefined) kernel.manipulates.set(showId, { descriptor: manipulate, scale })
     const image = evaluated.images.find(i => i.mediaType === 'image/png') ?? evaluated.images[0]
     if (image === undefined) throw new Error(`wolfram_show produced no image. Kernel output:\n${text || '(empty)'}`)
+    const timing = { evalMs: report?.evalMs ?? null, rasterMs: report?.rasterMs ?? null, kernelMs: report?.kernelMs ?? null, totalMs }
     const size = pngSize(image.data) ?? { width: 0, height: 0 }
     const points = { width: Math.round(size.width / scale), height: Math.round(size.height / scale) }
     const path = config.writeFiles ? await writeShowFile(image.data, scale) : undefined
     const stored = await storeImage(image.data, path !== undefined ? basename(path) : 'wolfram-show.png')
-    trace({ event: 'show', kernelId: kernel.id, px: size, pt: points, path: path ?? null, manipulate: manipulate?.id ?? null })
+    trace({ event: 'show', kernelId: kernel.id, px: size, pt: points, path: path ?? null, manipulate: manipulate?.id ?? null, timing })
     return {
       kernelId: kernel.id, opened, startupMs: kernel.startupMs,
       attachment: stored.ref !== undefined ? cleanRef(stored.ref) : null,
       devicePixels: size, points, scale, resolution, bytes: image.data.byteLength,
       see: args.see === true, label: args.label ?? '', theme: themeOf(kernel),
       manipulate: manipulate ?? null,
+      timing, errorImage: report?.errorImage === true, messages: report?.messages ?? [],
       ...(path !== undefined ? { path } : {}),
       ...(stored.ref === undefined ? { inlineUnavailable: stored.reason ?? 'attachment store unavailable' } : {}),
       pngBytes: image.data,
