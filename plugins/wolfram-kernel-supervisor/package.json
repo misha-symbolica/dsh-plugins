@@ -10,10 +10,23 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
-  "files": ["index.js", "kernels.mjs", "tools.mjs", "servers.mjs", "lib/client.js", "lib/client.js.map", "cordis.patch.yml"],
+  "files": [
+    "index.js",
+    "kernels.mjs",
+    "tools.mjs",
+    "servers.mjs",
+    "kernel/DSHPlugin.wl",
+    "lib/client.js",
+    "lib/client.js.map",
+    "cordis.patch.yml"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
-    "client": { "platform": "web" }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
   },
   "scripts": {
     "build": "node build.mjs",

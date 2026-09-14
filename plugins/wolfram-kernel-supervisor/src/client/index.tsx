@@ -8,6 +8,13 @@
  *   wolfram_eval   text output plus any image blocks the result carries
  *   wolfram_run    (same row as wolfram_eval)
  *
+ * plus INTERACTIVE Manipulate widgets: when the host's presentationMeta carries
+ * a `manipulate` descriptor (kernel/DSHPlugin.wl parsed the control specs),
+ * native controls render next to the image and, on release, the <img> reloads
+ * from GET /api/wolfram/manipulate?…&values=[…] — a fresh rasterization in the
+ * same kernel. One request in flight at a time, latest value wins; a 410 (kernel
+ * gone) disables the controls with a note.
+ *
  * plus a PINNED GALLERY under each turn's final answer: in the default
  * "compact" transcript view the chat folds a settled turn's tool rows into a
  * "N tool calls" disclosure, which would hide the very image wolfram_show
@@ -40,7 +47,7 @@ import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { DisclosureRow, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CSSProperties, ReactNode } from 'react'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 type Props = PropsRuntime<'tool.call.toolview'>
 type Block = Props['block']
@@ -220,6 +227,136 @@ function WolframImage({ source, image, pointWidth, alt, path }: { source: { url:
   )
 }
 
+
+// ---------------------------------------------------------------- Manipulate widget
+
+function manipulateUrl(sessionId: string, kernelId: string, id: string, values: ControlValue[]): string {
+  return `/api/wolfram/manipulate?sessionId=${encodeURIComponent(sessionId)}&kernelId=${encodeURIComponent(kernelId)}&id=${encodeURIComponent(id)}&values=${encodeURIComponent(JSON.stringify(values))}`
+}
+
+const CONTROLS_STYLE: CSSProperties = { display: 'grid', gridTemplateColumns: 'max-content minmax(140px, 260px) max-content', gap: '6px 10px', alignItems: 'center', fontSize: 12, padding: '4px 2px' }
+const CHIP_STYLE: CSSProperties = { font: 'inherit', fontSize: 12, padding: '2px 8px', borderRadius: 4, border: '1px solid color-mix(in srgb, currentColor 25%, transparent)', background: 'transparent', color: 'inherit', cursor: 'pointer' }
+const CHIP_ON: CSSProperties = { ...CHIP_STYLE, background: 'color-mix(in srgb, currentColor 18%, transparent)', borderColor: 'color-mix(in srgb, currentColor 50%, transparent)' }
+
+function formatNumber(v: number): string {
+  return Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/\.?0+$/, '')
+}
+
+/**
+ * Native controls for a registered Manipulate plus the live frame. `commit`
+ * fires on release/change (not on every slider pixel); renders are serialized
+ * with the newest requested values replacing any queued ones.
+ */
+function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, scale, alt, path }: {
+  sessionId: string, kernelId: string, descriptor: ManipulateDescriptor, initialUrl: string, image: ImageRef, scale: number, alt: string, path: string | undefined,
+}) {
+  const [values, setValues] = useState<ControlValue[]>(() => descriptor.controls.map(c => c.init))
+  const [src, setSrc] = useState(initialUrl)
+  const [busy, setBusy] = useState(false)
+  const [dead, setDead] = useState<string | undefined>(undefined)
+  const [size, setSize] = useState<{ w: number, h: number }>({ w: image.width / scale, h: image.height / scale })
+  const inflight = useRef(false)
+  const queued = useRef<ControlValue[] | undefined>(undefined)
+
+  const render = useCallback(async (next: ControlValue[]) => {
+    if (inflight.current) { queued.current = next; return }
+    inflight.current = true
+    setBusy(true)
+    try {
+      const url = manipulateUrl(sessionId, kernelId, descriptor.id, next)
+      const response = await fetch(url, { credentials: 'same-origin' })
+      if (response.status === 410) { setDead(await response.text()); return }
+      if (!response.ok) { setDead(`${response.status}: ${(await response.text()).slice(0, 200)}`); return }
+      const blob = await response.blob()
+      const w = Number(response.headers.get('x-wolfram-width')), h = Number(response.headers.get('x-wolfram-height'))
+      const s = Number(response.headers.get('x-wolfram-scale')) || scale
+      if (w > 0 && h > 0) setSize({ w: w / s, h: h / s })
+      setSrc(prev => { if (prev.startsWith('blob:')) URL.revokeObjectURL(prev); return URL.createObjectURL(blob) })
+    } catch (error) {
+      setDead(String(error))
+    } finally {
+      inflight.current = false
+      setBusy(false)
+      const pending = queued.current
+      queued.current = undefined
+      if (pending !== undefined) void render(pending)
+    }
+  }, [sessionId, kernelId, descriptor.id, scale])
+
+  const commit = (index: number, v: ControlValue) => {
+    const next = values.map((old, i) => (i === index ? v : old))
+    setValues(next)
+    void render(next)
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start', maxWidth: '100%' }}>
+      <div style={{ ...IMAGE_FRAME, opacity: busy ? 0.75 : 1, transition: 'opacity 120ms' }}>
+        <img src={src} alt={alt} title={path ?? alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} />
+      </div>
+      <div style={CONTROLS_STYLE} data-wolfram-manipulate={descriptor.id}>
+        {descriptor.controls.map((control, i) => {
+          const v = values[i] as ControlValue
+          const disabled = dead !== undefined
+          if (control.type === 'slider') {
+            return (
+              <FragmentRow key={control.name} label={control.label}>
+                <input
+                  type="range" min={control.min} max={control.max} step={control.step ?? 'any'} value={v as number} disabled={disabled}
+                  onChange={(e) => { const n = Number(e.target.value); setValues(vs => vs.map((old, j) => (j === i ? n : old))) }}
+                  onPointerUp={(e) => commit(i, Number((e.target as HTMLInputElement).value))}
+                  onKeyUp={(e) => commit(i, Number((e.target as HTMLInputElement).value))}
+                  style={{ width: '100%' }}
+                />
+                <span style={{ opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{formatNumber(v as number)}</span>
+              </FragmentRow>
+            )
+          }
+          if (control.type === 'checkbox') {
+            return (
+              <FragmentRow key={control.name} label={control.label}>
+                <input type="checkbox" checked={v === true} disabled={disabled} onChange={(e) => commit(i, e.target.checked)} style={{ justifySelf: 'start' }} />
+                <span />
+              </FragmentRow>
+            )
+          }
+          if (control.type === 'popup') {
+            return (
+              <FragmentRow key={control.name} label={control.label}>
+                <select value={v as number} disabled={disabled} onChange={(e) => commit(i, Number(e.target.value))} style={{ font: 'inherit', fontSize: 12 }}>
+                  {control.choices.map((choice, k) => <option key={k} value={k}>{choice}</option>)}
+                </select>
+                <span />
+              </FragmentRow>
+            )
+          }
+          return (
+            <FragmentRow key={control.name} label={control.label}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {control.choices.map((choice, k) => (
+                  <button key={k} type="button" disabled={disabled} style={v === k ? CHIP_ON : CHIP_STYLE} onClick={() => commit(i, k)}>{choice}</button>
+                ))}
+              </div>
+              <span />
+            </FragmentRow>
+          )
+        })}
+      </div>
+      {dead !== undefined && <div style={{ fontSize: 12, opacity: 0.7 }}>controls disabled — {dead}</div>}
+    </div>
+  )
+}
+
+/** One grid row: label, control, readout. */
+function FragmentRow({ label, children }: { label: string, children: ReactNode }) {
+  return (
+    <>
+      <span style={{ opacity: 0.8, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>{label}</span>
+      {children}
+    </>
+  )
+}
+
 // ---------------------------------------------------------------- row chrome
 
 const SPIKEY = (
@@ -270,8 +407,34 @@ function KernelRow({ title, summary, state, defaultOpen, children }: { title: st
 
 // ---------------------------------------------------------------- wolfram_show
 
+type ManipulateControl =
+  | { name: string, label: string, type: 'slider', min: number, max: number, step: number | null, init: number }
+  | { name: string, label: string, type: 'checkbox', init: boolean }
+  | { name: string, label: string, type: 'setter' | 'popup', choices: string[], init: number }
+interface ManipulateDescriptor { id: string, controls: ManipulateControl[] }
+type ControlValue = number | boolean
+
+/** Narrow the host's manipulate descriptor (untrusted on replay). */
+function asManipulate(value: unknown): ManipulateDescriptor | undefined {
+  if (!isRecord(value) || typeof value.id !== 'string' || !Array.isArray(value.controls) || value.controls.length === 0) return undefined
+  const controls: ManipulateControl[] = []
+  for (const c of value.controls) {
+    if (!isRecord(c) || typeof c.name !== 'string') return undefined
+    const label = typeof c.label === 'string' ? c.label : c.name
+    if (c.type === 'slider' && typeof c.min === 'number' && typeof c.max === 'number' && typeof c.init === 'number') {
+      controls.push({ name: c.name, label, type: 'slider', min: c.min, max: c.max, step: typeof c.step === 'number' ? c.step : null, init: c.init })
+    } else if (c.type === 'checkbox') {
+      controls.push({ name: c.name, label, type: 'checkbox', init: c.init === true })
+    } else if ((c.type === 'setter' || c.type === 'popup') && Array.isArray(c.choices) && c.choices.every(x => typeof x === 'string') && typeof c.init === 'number') {
+      controls.push({ name: c.name, label, type: c.type, choices: c.choices as string[], init: c.init })
+    } else return undefined
+  }
+  return { id: value.id, controls }
+}
+
 interface ShowMeta {
   attachment: ImageRef | null
+  manipulate?: ManipulateDescriptor
   points?: { width: number, height: number }
   devicePixels?: { width: number, height: number }
   scale?: number
@@ -293,6 +456,7 @@ function showMetaOf(block: Block): ShowMeta | undefined {
     path: typeof meta.path === 'string' ? meta.path : null,
     label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
     kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
+    manipulate: asManipulate(meta.manipulate),
   }
 }
 
@@ -310,14 +474,16 @@ export function WolframShowRow({ block, loadImage, sessionId, openFile }: Props)
   const label = meta?.label ?? firstLine(expression)
   const kernelId = meta?.kernelId ?? kernelIdOf(block)
   const size = meta?.devicePixels && meta.points ? `${meta.points.width}×${meta.points.height} pt${meta.scale && meta.scale !== 1 ? ` @${meta.scale}x` : ''}` : ''
-  const summary = [kernelId, state === 'running' ? 'rendering…' : size].filter(Boolean).join(' · ')
+  const summary = [kernelId, state === 'running' ? 'rendering…' : size, meta?.manipulate !== undefined ? 'interactive' : ''].filter(Boolean).join(' · ')
   const ref = meta?.attachment ?? imageRefsOf(block)[0]
   const body = state === 'running'
     ? <pre style={PRE_STYLE}>{expression}</pre>
     : ref !== undefined
       ? (
         <>
-          <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />
+          {meta?.manipulate !== undefined && meta.attachment !== null && meta.kernelId !== undefined
+            ? <ManipulateWidget sessionId={String(sessionId)} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(String(sessionId), meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={label} path={meta.path ?? undefined} />
+            : <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />}
           <ShowCaption label={label} path={meta?.path ?? undefined} openFile={openFile} />
           <details style={{ fontSize: 12, opacity: 0.7 }}>
             <summary>expression</summary>
@@ -395,6 +561,7 @@ function shownFromMeta(meta: unknown): (ShowMeta & { attachment: ImageRef }) | u
     path: typeof meta.path === 'string' ? meta.path : null,
     label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
     kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
+    manipulate: asManipulate(meta.manipulate),
   }
 }
 
@@ -455,7 +622,9 @@ function ShownGallery({ matched, sessionId, openFile }: GalleryProps) {
     <div style={GALLERY_STYLE} data-wolfram-shown={matched.length}>
       {matched.map((item) => (
         <figure key={item.callId} style={{ margin: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
-          <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />
+          {item.meta.manipulate !== undefined && item.meta.kernelId !== undefined
+            ? <ManipulateWidget sessionId={sessionId} kernelId={item.meta.kernelId} descriptor={item.meta.manipulate} initialUrl={shownImageUrl(sessionId, item.meta.attachment)} image={item.meta.attachment} scale={item.meta.scale ?? 2} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />
+            : <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />}
           <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} openFile={openFile} />
         </figure>
       ))}

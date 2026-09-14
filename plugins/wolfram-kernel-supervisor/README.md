@@ -25,6 +25,30 @@ Kernel ids are `wl:<session>:<kernel>` (`s:M:N`-style, like browser-automation).
 (`Opened kernel wl:0:0 …` prefixes that result). Ids are validated against the
 caller's session; subagents get their own session (`subagents: true`).
 
+## Interactive `Manipulate`
+
+`wolfram_show` of a top-level `Manipulate[body, controls…]` becomes a live widget.
+`kernel/DSHPlugin.wl` (`DSHPlugin\`ShowRasterizer`, `HoldAllComplete`) parses the
+*simple* control forms with Manipulate's own semantics — non-variable parts are
+evaluated, so `{x, 0, Length[l]}` and `{n, Range[10]}` work:
+
+| Spec | Control |
+|---|---|
+| `{x, min, max}` · `{x, min, max, step}` · `{{x, init}, …}` · `{{x, init, "label"}, …}` | slider (readout shows the value) |
+| `{c, {a, b, c}}` (≤ 6 choices, or `ControlType -> Setter`) | setter bar (chips) |
+| `{c, {…7+ choices…}}` or `ControlType -> PopupMenu` | popup |
+| `{b, {True, False}}` | checkbox |
+| Manipulate options (`SaveDefinitions -> True`, …) | ignored |
+
+The held body and variables are registered under an id in the kernel; the
+initial frame is rasterized; the descriptor rides `presentationMeta`. On release
+the browser fetches `GET /api/wolfram/manipulate?sessionId&kernelId&id&values=[…]`;
+the host validates every value against the descriptor (sliders clamped, choice
+indices bounded, booleans) and evaluates `DSHPlugin\`Render[id, values]` — the
+body with the variables substituted, re-rasterized (~55 ms + transfer). Widgets
+live as long as the kernel: a 410 disables the controls with a note. The tool
+row and the pinned gallery each hold their own control state.
+
 ## How the image reaches the user (and not the model)
 
 1. Host: `wolfram_show` evaluates `Rasterize[(expr), Background -> None, ImageResolution -> 144]`
@@ -48,6 +72,14 @@ caller's session; subagents get their own session (`subagents: true`).
    `ctx.connection.fetch` (behind normal browser auth) and authorizes by
    scanning the session's events (live or cold) for a `tool/result` whose
    `meta.attachment.attachmentId` matches. `<img src>` uses it directly.
+
+## Kernel-side code
+
+All Wolfram code the plugin evaluates on your behalf is in `kernel/DSHPlugin.wl`
+(`Get`'d once per kernel at bootstrap): `ShowRasterizer`, `Render`, `RunScript`.
+No `.wl` files elsewhere, no paclet; the stock `Wolfram/AgentTools` server is
+used unmodified. Package symbols must not be spelled like `System\`` built-ins
+(`Show` resolved to the built-in and silently did nothing).
 
 ## Kernel lifecycle
 

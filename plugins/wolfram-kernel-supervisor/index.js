@@ -14,6 +14,13 @@
  * `presentationMeta` (the browser half, src/client, renders it inline at
  * point size) and give the model one line of text.
  *
+ * MANIPULATE. wolfram_show of a top-level Manipulate[body, {x,0,1}, …] becomes an
+ * interactive widget: kernel/DSHPlugin.wl parses the simple control forms the
+ * way Manipulate does, prints a JSON descriptor, and the GUI draws native
+ * controls; on release the <img> reloads from GET /api/wolfram/manipulate?…
+ * &values=[…], which re-rasterizes the held body in the same kernel with the
+ * variables substituted. Widgets die with their kernel (410 → controls disable).
+ *
  * IMAGE ROUTE. The GUI reads durable attachments only after the core proves
  * the session log references them in a *content* image block; a reference
  * that lives solely in presentationMeta (the user-only path) is invisible to
@@ -49,10 +56,11 @@
 
 import { execFileSync } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
-import { KernelSessions } from './kernels.mjs'
+import { KernelSessions, evaluate } from './kernels.mjs'
 import { findAgentToolsDirectory, findKernel, kernelLaunch } from './servers.mjs'
-import { createTools } from './tools.mjs'
+import { createTools, pngSize } from './tools.mjs'
 
 export const name = 'wolfram-kernel-supervisor'
 
@@ -75,8 +83,11 @@ export const Config = Schema.object({
 })
 
 const PLUGIN_SOURCE = { kind: 'plugin', plugin: 'wolfram-kernel-supervisor' }
-/** Exact Fetch route (below /api) that serves wolfram_show images to the GUI. Mirrored in src/client. */
+/** Exact Fetch routes (below /api). Mirrored in src/client. */
 export const SHOWN_IMAGE_PATH = '/api/wolfram/shown'
+export const MANIPULATE_PATH = '/api/wolfram/manipulate'
+/** Kernel-side support code, Get[]'d once per kernel at bootstrap (DSHPlugin` context). */
+export const KERNEL_PACKAGE = fileURLToPath(new URL('./kernel/DSHPlugin.wl', import.meta.url))
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx - host-plane plugin context.
@@ -129,8 +140,13 @@ export function apply(ctx, config) {
     return 'light'
   }
 
-  /** Wolfram code that pins the kernel's front-end appearance (Plot themes, Grid frames, Rasterize background follow it). */
-  const themeBootstrap = (theme) => `UsingFrontEnd[CurrentValue[$FrontEndSession, LightDark] = ${theme === 'dark' ? '"Dark"' : '"Light"'}];`
+  /**
+   * Per-kernel bootstrap code: pin the front-end appearance (Plot themes, Grid
+   * frames, text colour follow it) and load the DSHPlugin` package that owns
+   * Show / Render / RunScript (kernel/DSHPlugin.wl).
+   */
+  const kernelBootstrap = (theme) =>
+    `UsingFrontEnd[CurrentValue[$FrontEndSession, LightDark] = ${theme === 'dark' ? '"Dark"' : '"Light"'}]; Get[${JSON.stringify(KERNEL_PACKAGE)}];`
 
   const sessions = new KernelSessions({
     spec: (session, kernelIndex) => {
@@ -140,7 +156,7 @@ export function apply(ctx, config) {
         ...launch,
         clientName: `DSH ${chatLabel(session.agent)} · wl:${session.index}:${kernelIndex}`,
         cwd: session.agent.session.header?.cwd,
-        bootstrap: themeBootstrap(theme),
+        bootstrap: kernelBootstrap(theme),
       }
     },
     timeoutMs: config.toolCallTimeoutMs,
@@ -248,6 +264,76 @@ export function apply(ctx, config) {
       const headers = { 'content-type': stored.ref.mediaType, 'content-length': String(stored.data.byteLength), 'cache-control': 'private, max-age=31536000, immutable' }
       if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
       return new Response(stored.data, { status: 200, headers })
+    },
+  })
+
+
+  // ---------------- interactive Manipulate renders
+
+  /** Find a live, supervised kernel of the given session by id (both ids come from the browser, untrusted). */
+  function kernelFor(sessionId, kernelId) {
+    for (const session of sessions.sessions.values()) {
+      const agent = session.agent
+      if (agent.id !== sessionId && agent.session?.id !== sessionId) continue
+      for (const kernel of session.kernels.values()) {
+        if (kernel.id === kernelId && kernel.conn !== undefined && !kernel.conn.closed) return kernel
+      }
+    }
+    return undefined
+  }
+
+  /** Validate browser-supplied control values against the stored descriptor; returns Wolfram list source or undefined. */
+  function wolframValues(descriptor, values) {
+    if (!Array.isArray(values) || values.length !== descriptor.controls.length) return undefined
+    const out = []
+    for (const [i, control] of descriptor.controls.entries()) {
+      const v = values[i]
+      if (control.type === 'slider') {
+        if (typeof v !== 'number' || !Number.isFinite(v)) return undefined
+        const clamped = Math.min(control.max, Math.max(control.min, v))
+        out.push(Number.isInteger(clamped) ? `${clamped}.` : String(clamped))
+      } else if (control.type === 'checkbox') {
+        out.push(v === true ? 'True' : 'False')
+      } else {
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v >= control.choices.length) return undefined
+        out.push(String(v))
+      }
+    }
+    return `{${out.join(', ')}}`
+  }
+
+  ctx.connection.fetch.register({
+    path: MANIPULATE_PATH,
+    methods: ['GET', 'HEAD'],
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      const sessionId = url.searchParams.get('sessionId') ?? ''
+      const kernelId = url.searchParams.get('kernelId') ?? ''
+      const id = url.searchParams.get('id') ?? ''
+      let values
+      try { values = JSON.parse(url.searchParams.get('values') ?? '') } catch { return new Response('values must be a JSON array', { status: 400 }) }
+      const kernel = kernelFor(sessionId, kernelId)
+      if (kernel === undefined) return new Response(`kernel ${kernelId || '?'} is not running for this chat; re-run wolfram_show`, { status: 410 })
+      const entry = kernel.manipulates?.get(id)
+      if (entry === undefined) return new Response(`no interactive graphic "${id}" in kernel ${kernelId}; re-run wolfram_show`, { status: 410 })
+      const list = wolframValues(entry.descriptor, values)
+      if (list === undefined) return new Response('values do not match the controls', { status: 400 })
+      let result
+      try {
+        result = await evaluate(kernel, `DSHPlugin\`Render[${JSON.stringify(id)}, ${list}]`)
+      } catch (error) {
+        return new Response(`render failed: ${error instanceof Error ? error.message : String(error)}`, { status: 500 })
+      }
+      const image = result.images.find(i => i.mediaType === 'image/png') ?? result.images[0]
+      if (image === undefined) return new Response(`render produced no image: ${result.text.slice(0, 500)}`, { status: 500 })
+      const size = pngSize(image.data)
+      const headers = {
+        'content-type': image.mediaType, 'content-length': String(image.data.byteLength), 'cache-control': 'no-store',
+        'x-wolfram-scale': String(entry.scale), ...(size ? { 'x-wolfram-width': String(size.width), 'x-wolfram-height': String(size.height) } : {}),
+      }
+      trace({ event: 'manipulate-render', kernelId, id, values })
+      if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
+      return new Response(image.data, { status: 200, headers })
     },
   })
 

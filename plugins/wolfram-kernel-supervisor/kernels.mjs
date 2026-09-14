@@ -142,7 +142,7 @@ export class KernelSessions {
     /** @type {Kernel} */
     const kernel = {
       id, index: kernelIndex, label: label ?? '', conn: undefined, pid: undefined, sandboxPid: undefined,
-      evalSession: undefined, startedAt, lastUsedAt: startedAt, evalCount: 0, cwd: spec.cwd ?? process.cwd(), startupMs: 0, ready: undefined, theme: session.theme ?? 'light',
+      evalSession: undefined, startedAt, lastUsedAt: startedAt, evalCount: 0, cwd: spec.cwd ?? process.cwd(), startupMs: 0, ready: undefined, theme: session.theme ?? 'light', manipulates: new Map(),
     }
     session.kernels.set(kernelIndex, kernel)
     session.order.push(kernelIndex)
@@ -332,6 +332,7 @@ export class KernelSessions {
  * @property {number} startupMs
  * @property {Promise<Kernel> | undefined} ready
  * @property {'light' | 'dark'} theme - appearance the kernel's front end was pinned to at bootstrap
+ * @property {Map<string, { descriptor: object, scale: number }>} manipulates - interactive graphics registered by wolfram_show (kernel lifetime)
  */
 /**
  * @typedef {object} Session

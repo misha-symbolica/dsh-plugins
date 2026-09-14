@@ -57,6 +57,30 @@ export function showFileName(bytes, scale) {
   return `${timestamp()}-${hash}@${tag}x.png`
 }
 
+/** The `DSH-MANIPULATE:{…}` descriptor DSHPlugin`ShowRasterizer prints for an interactive graphic, validated. */
+export function parseManipulate(text) {
+  const match = /DSH-MANIPULATE:(\{.*\})\s*$/m.exec(text)
+  if (match === null) return undefined
+  let parsed
+  try { parsed = JSON.parse(match[1]) } catch { return undefined }
+  if (typeof parsed?.id !== 'string' || !Array.isArray(parsed.controls) || parsed.controls.length === 0) return undefined
+  const controls = []
+  for (const c of parsed.controls) {
+    if (typeof c?.name !== 'string' || typeof c.type !== 'string') return undefined
+    const label = typeof c.label === 'string' ? c.label : c.name
+    if (c.type === 'slider') {
+      if (typeof c.min !== 'number' || typeof c.max !== 'number' || typeof c.init !== 'number') return undefined
+      controls.push({ name: c.name, label, type: 'slider', min: c.min, max: c.max, step: typeof c.step === 'number' ? c.step : null, init: c.init })
+    } else if (c.type === 'checkbox') {
+      controls.push({ name: c.name, label, type: 'checkbox', init: c.init === true })
+    } else if (c.type === 'setter' || c.type === 'popup') {
+      if (!Array.isArray(c.choices) || !c.choices.every(x => typeof x === 'string') || typeof c.init !== 'number') return undefined
+      controls.push({ name: c.name, label, type: c.type, choices: c.choices, init: c.init })
+    } else return undefined
+  }
+  return { id: parsed.id, controls }
+}
+
 /** A JSON-clean copy of an attachment reference (no undefined members). */
 function cleanRef(ref) {
   const out = { attachmentId: String(ref.attachmentId), mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height }
@@ -221,9 +245,8 @@ export function createTools(deps, fallbackAgent) {
       if (!SCRIPT_EXTENSIONS.has(extname(path).toLowerCase())) throw new Error(`wolfram_run accepts .wl, .wls or .m files; got "${basename(path)}".`)
       try { if (!(await stat(path)).isFile()) throw new Error('not a file') } catch { throw new Error(`No script at ${path}.`) }
       const { kernel, opened } = await sessions.resolve(agent, args.kernelId)
-      const argv = [path, ...(args.args ?? [])].map(wlString).join(', ')
-      // $ScriptCommandLine is Protected in the evaluator kernel (Set::wrsym otherwise).
-      const code = `Unprotect[$ScriptCommandLine]; $ScriptCommandLine = {${argv}}; Protect[$ScriptCommandLine]; Get[${wlString(path)}]`
+      const argv = (args.args ?? []).map(wlString).join(', ')
+      const code = `DSHPlugin\`RunScript[${wlString(path)}, {${argv}}]`
       const { text, images } = await evaluate(kernel, code, { timeConstraint: args.timeConstraint })
       const admitted = await admitAll(exec, images, `wolfram-run-${Date.now()}`)
       return { kernelId: kernel.id, opened, startupMs: kernel.startupMs, path, output: text, ...admitted }
@@ -233,7 +256,7 @@ export function createTools(deps, fallbackAgent) {
 
   tools.push(defineTool({
     name: 'wolfram_show',
-    description: 'Render a Wolfram Language expression (plot, graphic, grid, typeset formula, image, Style[…]) at retina resolution and SHOW IT TO THE USER inline in the chat, evaluated in this chat\'s kernel so it can use variables you defined with wolfram_eval. The image is displayed to the user directly by the GUI; you receive one line of metadata and the PNG path. Do NOT call read_image or wolfram_show again on the result — it is already visible. Graphics follow the GUI\'s light/dark appearance automatically (the kernel\'s front end is pinned to it). Set see:true only when YOU need to inspect the rendering too (costs image tokens).',
+    description: 'Render a Wolfram Language expression (plot, graphic, grid, typeset formula, image, Style[…]) at retina resolution and SHOW IT TO THE USER inline in the chat. A top-level Manipulate[body, {x, 0, 1}, {c, {a, b}}, …] with simple control specs becomes an INTERACTIVE widget with native controls the user can drive (re-rendered in this kernel on release). Evaluated in this chat\'s kernel so it can use variables you defined with wolfram_eval. The image is displayed to the user directly by the GUI; you receive one line of metadata and the PNG path. Do NOT call read_image or wolfram_show again on the result — it is already visible. Graphics follow the GUI\'s light/dark appearance automatically (the kernel\'s front end is pinned to it). Set see:true only when YOU need to inspect the rendering too (costs image tokens).',
     parameters: {
       expression: { type: 'string', required: true, description: 'Expression to render, e.g. Plot[Sin[x], {x, 0, 2 Pi}] or Grid[data, Frame -> All]. Multiple statements allowed; the last one is rendered.' },
       kernelId: KERNEL_ID,
@@ -245,9 +268,9 @@ export function createTools(deps, fallbackAgent) {
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_args, v) => [{ type: 'text', text: tagged(v, `displayed ${v.label || 'image'}: ${v.devicePixels.width}x${v.devicePixels.height} px = ${v.points.width}x${v.points.height} pt (@${v.scale}x)${v.path ? `, ${v.path}` : ''}. ${v.attachment !== null ? 'Shown to the user inline already; do not call read_image or wolfram_show on it again.' : `Not shown inline (${v.inlineUnavailable}); the PNG is on disk at the path above.`}${v.see && v.attachment !== null ? ' Image attached below for you.' : ''}`) }],
+      render: (_args, v) => [{ type: 'text', text: tagged(v, `displayed ${v.label || 'image'}: ${v.devicePixels.width}x${v.devicePixels.height} px = ${v.points.width}x${v.points.height} pt (@${v.scale}x)${v.path ? `, ${v.path}` : ''}. ${v.attachment !== null ? 'Shown to the user inline already; do not call read_image or wolfram_show on it again.' : `Not shown inline (${v.inlineUnavailable}); the PNG is on disk at the path above.`}${v.see && v.attachment !== null ? ' Image attached below for you.' : ''}${v.manipulate ? ` Interactive: ${v.manipulate.controls.map(c => `${c.name} (${c.type})`).join(', ')} — the user can drive the controls in the chat; the kernel keeps the definition while it runs.` : ''}`) }],
       // Card metadata the client renders; never part of the model-visible content.
-      presentationMeta: (_args, v) => ({ attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme }),
+      presentationMeta: (_args, v) => ({ attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate }),
     },
     async execute(args, exec) {
       const { kernel, opened } = await sessions.resolve(agentOf(exec), args.kernelId)
@@ -255,9 +278,17 @@ export function createTools(deps, fallbackAgent) {
       const scale = resolution / 72
       // Background -> None: transparent PNG, so the GUI's own light/dark page shows
       // through (a bare Graphics otherwise gets Rasterize's opaque page fill).
+      // DSHPlugin`ShowRasterizer (kernel/DSHPlugin.wl) holds the expression; a top-level
+      // Manipulate is registered under `showId` and described on a
+      // "DSH-MANIPULATE:" Print line that the GUI turns into native controls.
       const background = args.background === 'opaque' ? 'Automatic' : 'None'
-      const code = `Rasterize[(\n${args.expression}\n), Background -> ${background}, ImageResolution -> ${resolution}]`
-      const { text, images } = await evaluate(kernel, code, { timeConstraint: args.timeConstraint })
+      const showId = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+      const code = `DSHPlugin\`ShowRasterizer[${JSON.stringify(showId)}, (\n${args.expression}\n), "Resolution" -> ${resolution}, "Background" -> ${background}]`
+      const evaluated = await evaluate(kernel, code, { timeConstraint: args.timeConstraint })
+      const { images } = evaluated
+      const manipulate = parseManipulate(evaluated.text)
+      const text = evaluated.text.replace(/^.*DSH-MANIPULATE:.*$/m, '').trim()
+      if (manipulate !== undefined) kernel.manipulates.set(showId, { descriptor: manipulate, scale })
       const image = images.find(i => i.mediaType === 'image/png') ?? images[0]
       if (image === undefined) throw new Error(`wolfram_show produced no image. Kernel output:\n${text || '(empty)'}`)
       const size = pngSize(image.data) ?? { width: 0, height: 0 }
@@ -269,6 +300,7 @@ export function createTools(deps, fallbackAgent) {
         attachment: stored.ref !== undefined ? cleanRef(stored.ref) : null,
         devicePixels: size, points, scale, resolution, bytes: image.data.byteLength,
         see: args.see === true, label: args.label ?? '', theme: themeOf(kernel),
+        manipulate: manipulate ?? null,
         ...(path !== undefined ? { path } : {}),
         ...(stored.ref === undefined ? { inlineUnavailable: stored.reason ?? 'attachment store unavailable' } : {}),
       }
