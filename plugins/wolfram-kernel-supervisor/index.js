@@ -61,6 +61,7 @@
  */
 
 import { execFile, execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { appendFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
@@ -91,6 +92,18 @@ export const Config = Schema.object({
 })
 
 const PLUGIN_SOURCE = { kind: 'plugin', plugin: 'wolfram-kernel-supervisor' }
+
+/**
+ * A complete user-role message for `agent.inject`. DSH's `UserMessage.content`
+ * is a `ContentBlock[]`; injecting a bare string is persisted as-is and then
+ * every later turn of that session fails with "content.some is not a function".
+ * Mirrors `createUserMessage` in `@deepseek-ai/dsh-llm` (role + fresh id) without
+ * taking the dependency.
+ * @param {string} text - the notice text.
+ */
+function pluginNotice(text) {
+  return { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: PLUGIN_SOURCE }
+}
 /** Exact Fetch routes (below /api). Mirrored in src/client. */
 export const SHOWN_IMAGE_PATH = '/api/wolfram/shown'
 export const MANIPULATE_PATH = '/api/wolfram/manipulate'
@@ -174,10 +187,9 @@ export function apply(ctx, config) {
     maxGlobal: config.maxKernelsGlobal,
     onIdleClose: (agent, closed) => {
       try {
-        agent.inject({
-          content: `[wolfram-kernel-supervisor] Closed idle Wolfram kernel(s) ${closed.join(', ')} after ${config.idleMinutes} min without use; their definitions are gone. Any wolfram_* call starts a fresh kernel.`,
-          source: PLUGIN_SOURCE,
-        })
+        agent.inject(pluginNotice(
+          `[wolfram-kernel-supervisor] Closed idle Wolfram kernel(s) ${closed.join(', ')} after ${config.idleMinutes} min without use; their definitions are gone. Any wolfram_* call starts a fresh kernel.`,
+        ))
       } catch { /* agent disposed or not accepting injections */ }
     },
     trace,
