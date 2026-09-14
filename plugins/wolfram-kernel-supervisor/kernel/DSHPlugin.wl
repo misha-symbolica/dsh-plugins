@@ -125,6 +125,72 @@ ShowRasterizer[id_String, Manipulate[body_, controls___], opts : OptionsPattern[
   renderWith[id, init]
 ];
 
+
+(* ---- label content trees ----
+   Control labels and choice labels are sent to the GUI as small JSON trees
+   (not strings), so Style / Row / Superscript / lists / associations render as
+   half-decent HTML. Nodes: {"t":"s","v":text} | {"t":"code","v":text} |
+   {"t":"list"|"row"|"col","c":[...],"sep":node?} | {"t":"assoc","c":[[k,v],...]} |
+   {"t":"style","c":node,"bold":bool,"italic":bool,"color":css,"size":n} |
+   {"t":"sup"|"sub","c":[base, script]} | {"t":"subsup","c":[base, sub, sup]} |
+   {"t":"color","css":css,"v":name} | {"t":"tip","c":node,"tip":text} | {"t":"frame","c":node}. *)
+
+$labelDepth = 5; $labelItems = 12;
+
+cssColor[c_?ColorQ] := With[{rgb = List @@ ColorConvert[c, "RGB"]},
+  "rgb(" <> StringRiffle[ToString[Round[255 #]] & /@ rgb[[;; 3]], " "] <> If[Length[rgb] > 3 && rgb[[4]] < 1, " / " <> ToString[N[rgb[[4]]]], ""] <> ")"];
+
+textNode[str_String] := <|"t" -> "s", "v" -> str|>;
+SetAttributes[codeNode, HoldAllComplete];
+codeNode[e_] := <|"t" -> "code", "v" -> StringTake[ToString[Unevaluated[e], InputForm], UpTo[80]]|>;
+
+SetAttributes[labelTree, HoldFirst];   (* the expression is held; the depth evaluates *)
+labelTree[e_] := labelTree[e, $labelDepth];
+labelTree[e_, 0] := codeNode[e];
+labelTree[s_String, _] := textNode[s];
+labelTree[n_?NumberQ, _] := textNode[ToString[n, InputForm]];
+labelTree[sym_Symbol, _] := With[{v = sym, name = SymbolName[Unevaluated[sym]]},
+  If[ColorQ[v] && ! MatchQ[v, _Symbol],           (* a colour name such as Red: swatch + name *)
+    <|"t" -> "color", "css" -> cssColor[v], "v" -> name|>,
+    textNode[name]]];
+labelTree[c : Except[_Symbol, _?ColorQ], _] := <|"t" -> "color", "css" -> cssColor[c], "v" -> ""|>;
+labelTree[Style[e_, opts___], d_] := Module[{o = {opts}, node = <|"t" -> "style", "c" -> labelTree[e, d - 1]|>},
+  If[MemberQ[o, Bold] || MemberQ[o, FontWeight -> Bold | "Bold"], node["bold"] = True];
+  If[MemberQ[o, Italic] || MemberQ[o, FontSlant -> Italic | "Italic"], node["italic"] = True];
+  With[{col = FirstCase[o, (c_?ColorQ) :> c]}, If[ColorQ[col], node["color"] = cssColor[col]]];
+  With[{col = FirstCase[o, (FontColor -> c_?ColorQ) :> c]}, If[ColorQ[col], node["color"] = cssColor[col]]];
+  With[{sz = FirstCase[o, (n_?NumberQ) :> n]}, If[NumberQ[sz], node["size"] = N[sz]]];
+  With[{sz = FirstCase[o, (FontSize -> n_?NumberQ) :> n]}, If[NumberQ[sz], node["size"] = N[sz]]];
+  node];
+labelTree[Row[l_List, sep_ : Nothing], d_] := <|"t" -> "row", "c" -> items[l, d], "sep" -> If[sep === Nothing, Null, labelTree[sep, d - 1]]|>;
+labelTree[Column[l_List, ___], d_] := <|"t" -> "col", "c" -> items[l, d]|>;
+labelTree[Superscript[a_, b_], d_] := <|"t" -> "sup", "c" -> {labelTree[a, d - 1], labelTree[b, d - 1]}|>;
+labelTree[Subscript[a_, b_], d_] := <|"t" -> "sub", "c" -> {labelTree[a, d - 1], labelTree[b, d - 1]}|>;
+labelTree[Subsuperscript[a_, b_, c_], d_] := <|"t" -> "subsup", "c" -> {labelTree[a, d - 1], labelTree[b, d - 1], labelTree[c, d - 1]}|>;
+labelTree[Tooltip[e_, tip_], d_] := <|"t" -> "tip", "c" -> labelTree[e, d - 1], "tip" -> ToString[Unevaluated[tip]]|>;
+labelTree[(Framed | Panel | Pane | Text | TextCell | Item | Highlighted)[e_, ___], d_] := <|"t" -> "frame", "c" -> labelTree[e, d - 1]|>;
+labelTree[Rule[a_, b_], d_] := <|"t" -> "row", "c" -> {labelTree[a, d - 1], textNode[" \[Rule] "], labelTree[b, d - 1]}, "sep" -> Null|>;
+labelTree[l_List, d_] := <|"t" -> "list", "c" -> items[l, d]|>;
+labelTree[a_Association, d_] := <|"t" -> "assoc", "c" -> KeyValueMap[{labelTree[#1, d - 1], labelTree[#2, d - 1]} &, Take[a, UpTo[$labelItems]]]|>;
+labelTree[Graphics[___] | Graphics3D[___] | Image[___] | Legended[___], _] := textNode["\[FilledSquare] graphic"];
+labelTree[e_, _] := codeNode[e];
+
+items[l_List, d_] := Join[List @@ Map[Function[x, labelTree[x, d - 1], HoldAllComplete], Take[Hold @@ Unevaluated[l], UpTo[$labelItems]]],
+  If[Length[Unevaluated[l]] > $labelItems, {textNode["\[Ellipsis]"]}, {}]];
+
+(* Plain-text projection of a tree (for the model-facing text and as a fallback). *)
+labelText[KeyValuePattern[{"t" -> "s" | "code", "v" -> v_}]] := v;
+labelText[KeyValuePattern[{"t" -> "color", "v" -> v_}]] := If[v === "", "\[FilledSquare]", v];
+labelText[KeyValuePattern[{"t" -> "style" | "tip" | "frame", "c" -> c_}]] := labelText[c];
+labelText[KeyValuePattern[{"t" -> "list", "c" -> c_}]] := StringRiffle[labelText /@ c, ", "];
+labelText[KeyValuePattern[{"t" -> "row", "c" -> c_, "sep" -> sep_}]] := StringRiffle[labelText /@ c, If[sep === Null, "", labelText[sep]]];
+labelText[KeyValuePattern[{"t" -> "col", "c" -> c_}]] := StringRiffle[labelText /@ c, "; "];
+labelText[KeyValuePattern[{"t" -> "assoc", "c" -> c_}]] := StringRiffle[labelText[#[[1]]] <> ": " <> labelText[#[[2]]] & /@ c, ", "];
+labelText[KeyValuePattern[{"t" -> "sup", "c" -> {a_, b_}}]] := labelText[a] <> "^" <> labelText[b];
+labelText[KeyValuePattern[{"t" -> "sub", "c" -> {a_, b_}}]] := labelText[a] <> "_" <> labelText[b];
+labelText[KeyValuePattern[{"t" -> "subsup", "c" -> {a_, b_, c_}}]] := labelText[a] <> "_" <> labelText[b] <> "^" <> labelText[c];
+labelText[_] := "?";
+
 (* A control spec arrives as Hold[{...}]; return an Association or $Failed (not a control).
    Everything except the variable part is EVALUATED, as Manipulate does: {x, 0, Length[l]},
    {n, Range[10]} and {k, 1, 2 Pi} are all legal. *)
@@ -140,29 +206,33 @@ parseControl[Hold[{var_, second_, rest___}]] /; ! MatchQ[Unevaluated[var], _Rule
 parseControl[_] := $Failed;
 
 (* {var} | {{var, init}} | {{var, init, label}} *)
-varParts[Hold[{sym_Symbol, init_, label_}]] := {Hold[sym], Hold[init], ToString[Unevaluated[label]]};
-varParts[Hold[{sym_Symbol, init_}]] := {Hold[sym], Hold[init], SymbolName[Unevaluated[sym]]};
-varParts[Hold[{sym_Symbol}]] := {Hold[sym], Missing[], SymbolName[Unevaluated[sym]]};
-varParts[Hold[sym_Symbol]] := {Hold[sym], Missing[], SymbolName[Unevaluated[sym]]};
+varParts[Hold[{sym_Symbol, init_, label_}]] := {Hold[sym], Hold[init], labelTree[label]};
+varParts[Hold[{sym_Symbol, init_}]] := {Hold[sym], Hold[init], textNode[SymbolName[Unevaluated[sym]]]};
+varParts[Hold[{sym_Symbol}]] := {Hold[sym], Missing[], textNode[SymbolName[Unevaluated[sym]]]};
+varParts[Hold[sym_Symbol]] := {Hold[sym], Missing[], textNode[SymbolName[Unevaluated[sym]]]};
 varParts[_] := $Failed;
 
 sliderSpec[hv_, min_, max_, rest_List] := Module[{parts = varParts[hv], step, init},
   If[parts === $Failed, Return[$Failed]];
   step = FirstCase[rest, s_?NumericQ :> N[s], Null];
   init = Replace[parts[[2]], {Hold[i_?NumericQ] :> N[i], _ :> N[min]}];
-  <|"symbol" -> parts[[1]], "name" -> SymbolName @@ parts[[1]], "label" -> parts[[3]],
+  <|"symbol" -> parts[[1]], "name" -> SymbolName @@ parts[[1]], "label" -> labelText[parts[[3]]], "labelTree" -> parts[[3]],
     "type" -> "slider", "min" -> N[min], "max" -> N[max], "step" -> step,
     "init" -> Clip[init, {N[min], N[max]}]|>
 ];
 
 choiceSpec[hv_, heldLiteral_Hold, evaluated_List, rest_List] := Module[
-  {parts = varParts[hv], vals, labels, init, type, initVal},
+  {parts = varParts[hv], vals, labels, trees, init, type, initVal},
   If[parts === $Failed, Return[$Failed]];
   vals = Hold /@ evaluated;                                  (* held EVALUATED choice values *)
   (* Labels: the literal spellings when the spec was a literal list ({Red, Blue}), else InputForm of the values. *)
-  labels = If[MatchQ[heldLiteral, Hold[_List]] && Length[heldLiteral[[1]]] === Length[vals],
-    List @@ Map[Function[e, ToString[Unevaluated[e], InputForm], HoldAllComplete], heldLiteral[[1]]],
-    ToString[#, InputForm] & /@ evaluated];
+  (* Label trees: from the literal spelling when the spec was a literal list (so `Red` stays "Red" —
+     with a swatch, since it evaluates to a colour), else from the evaluated values. *)
+  trees = If[MatchQ[heldLiteral, Hold[_List]] && (Length @@ heldLiteral) === Length[vals],
+    (* Hold[{a, b}] -> {labelTree[a], labelTree[b]} with a, b never evaluated on the way. *)
+    ReleaseHold[Map[Function[e, labelTree[e], HoldAllComplete], heldLiteral, {2}]],
+    labelTree /@ evaluated];
+  labels = labelText /@ trees;
   type = Which[
     MatchQ[evaluated, {True, False} | {False, True}], "checkbox",
     MatchQ[FirstCase[rest, HoldPattern[ControlType -> t_] :> t], PopupMenu], "popup",
@@ -171,8 +241,8 @@ choiceSpec[hv_, heldLiteral_Hold, evaluated_List, rest_List] := Module[
     True, "setter"];
   initVal = Replace[parts[[2]], {Missing[] :> Missing[], Hold[i_] :> Hold[Evaluate[i]]}];
   init = Replace[initVal, {Missing[] -> 0, h_Hold :> Replace[FirstPosition[vals, h, {1}][[1]] - 1, Except[_Integer] -> 0]}];
-  <|"symbol" -> parts[[1]], "name" -> SymbolName @@ parts[[1]], "label" -> parts[[3]],
-    "type" -> type, "choices" -> labels, "values" -> vals,
+  <|"symbol" -> parts[[1]], "name" -> SymbolName @@ parts[[1]], "label" -> labelText[parts[[3]]], "labelTree" -> parts[[3]],
+    "type" -> type, "choices" -> labels, "choiceTrees" -> trees, "values" -> vals,
     "init" -> If[type === "checkbox", vals[[init + 1]] === Hold[True], init]|>
 ];
 

@@ -59,6 +59,15 @@ evaluated, so `{x, 0, Length[l]}` and `{n, Range[10]}` work:
 The held body and variables are registered under an id in the kernel; the
 initial frame is rasterized; the descriptor rides `presentationMeta`.
 
+**Labels.** Control labels (`{{x, init, label}}`) and choice labels are sent as
+small JSON trees (`labelTree` in the package) and rendered to HTML by the client:
+strings bare, numbers, symbols, colour names as swatch + name (`Red`), other
+colours as swatches, lists `1, 2, 3`, associations `k: v, …`, `Style` (Bold /
+Italic / colour / size), `Row`, `Column`, `Superscript`/`Subscript`/`Subsuperscript`,
+`Tooltip`, `Framed`, `Rule`; anything else as `code` (InputForm, 80 chars).
+Depth-capped at 5 and 12 items per list. A plain-text projection (`labelText`)
+feeds the model-facing text.
+
 **Guarded rendering.** Every render (`ShowRasterizer`, `Render`) goes through
 `evalAndRasterize`: the body under `TimeConstrained` (option `"TimeLimit"`, 30 s)
 + `Check` + an `` Internal`AddHandler["Message", …] `` trap (pattern from
@@ -91,6 +100,17 @@ indices bounded, booleans) and evaluates `DSHPlugin\`Render[id, values]` — the
 body with the variables substituted, re-rasterized (~55 ms + transfer). Widgets
 live as long as the kernel: a 410 disables the controls with a note. The tool
 row and the pinned gallery each hold their own control state.
+
+## Transport cost (measured)
+
+Not the base64. In-kernel: `Rasterize` 13–17 ms, PNG encode 6 ms, base64 0.1 ms,
+file write 0.07 ms. Host round trips: bare `1+1` through the evaluator 27 ms
+(sandbox bookkeeping), returning a ready `Image` 40 ms, a 40 KB string 30 ms,
+fresh `Rasterize` + return 91 ms (min 58), fresh `Rasterize` → PNG file → host
+reads it 99 ms. So writing frames to disk buys nothing; the variance is
+`Rasterize` itself. (`` MathLink`CallFrontEnd[ExportPacket[…, "ImageObjectPacket"]] ``
+à la CoreTools `ToImage` might shave a few ms off `Rasterize` — untested; it is
+not on the sandbox kernel's context path.)
 
 ## How the image reaches the user (and not the model)
 

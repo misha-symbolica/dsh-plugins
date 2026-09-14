@@ -97,17 +97,21 @@ export function parseManipulate(text) {
   try { parsed = JSON.parse(match[1]) } catch { return undefined }
   if (typeof parsed?.id !== 'string' || !Array.isArray(parsed.controls) || parsed.controls.length === 0) return undefined
   const controls = []
+  // Label trees are opaque JSON for the client renderer; keep them only when small and JSON-clean.
+  const tree = (v) => (v !== undefined && v !== null && typeof v === 'object' && JSON.stringify(v).length < 4000 ? v : null)
   for (const c of parsed.controls) {
     if (typeof c?.name !== 'string' || typeof c.type !== 'string') return undefined
     const label = typeof c.label === 'string' ? c.label : c.name
+    const labelTree = tree(c.labelTree)
     if (c.type === 'slider') {
       if (typeof c.min !== 'number' || typeof c.max !== 'number' || typeof c.init !== 'number') return undefined
-      controls.push({ name: c.name, label, type: 'slider', min: c.min, max: c.max, step: typeof c.step === 'number' ? c.step : null, init: c.init })
+      controls.push({ name: c.name, label, labelTree, type: 'slider', min: c.min, max: c.max, step: typeof c.step === 'number' ? c.step : null, init: c.init })
     } else if (c.type === 'checkbox') {
-      controls.push({ name: c.name, label, type: 'checkbox', init: c.init === true })
+      controls.push({ name: c.name, label, labelTree, type: 'checkbox', init: c.init === true })
     } else if (c.type === 'setter' || c.type === 'popup') {
       if (!Array.isArray(c.choices) || !c.choices.every(x => typeof x === 'string') || typeof c.init !== 'number') return undefined
-      controls.push({ name: c.name, label, type: c.type, choices: c.choices, init: c.init })
+      const choiceTrees = Array.isArray(c.choiceTrees) && c.choiceTrees.length === c.choices.length ? c.choiceTrees.map(tree) : c.choices.map(() => null)
+      controls.push({ name: c.name, label, labelTree, type: c.type, choices: c.choices, choiceTrees, init: c.init })
     } else return undefined
   }
   return { id: parsed.id, controls }

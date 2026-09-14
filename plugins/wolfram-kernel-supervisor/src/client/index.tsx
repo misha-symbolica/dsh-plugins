@@ -275,6 +275,50 @@ function WolframImage({ source, image, pointWidth, alt, path }: { source: { url:
 }
 
 
+
+// ---------------------------------------------------------------- label content
+
+const SWATCH: CSSProperties = { display: 'inline-block', width: 10, height: 10, borderRadius: 2, verticalAlign: '-1px', boxShadow: '0 0 0 1px color-mix(in srgb, currentColor 30%, transparent)', marginRight: 4 }
+
+/** Render a label tree as inline HTML; anything unrecognised falls back to its text. Depth-capped. */
+function LabelNode({ node, depth = 0 }: { node: LabelTree | null | undefined, depth?: number }): ReactNode {
+  if (node === null || node === undefined || typeof node !== 'object' || depth > 8) return null
+  const kids = (list: unknown, sep: ReactNode = null): ReactNode[] => (Array.isArray(list) ? list : []).flatMap((child, i) => {
+    const el = <LabelNode key={i} node={child as LabelTree} depth={depth + 1} />
+    return i > 0 && sep !== null ? [<span key={`s${i}`}>{sep}</span>, el] : [el]
+  })
+  switch (node.t) {
+    case 's': return <>{node.v}</>
+    case 'code': return <code style={{ fontSize: '0.92em' }}>{node.v}</code>
+    case 'color': return <><span style={{ ...SWATCH, background: node.css }} />{node.v}</>
+    case 'list': return <>{kids(node.c, ', ')}</>
+    case 'row': return <>{kids(node.c, node.sep ? <LabelNode node={node.sep} depth={depth + 1} /> : null)}</>
+    case 'col': return <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, verticalAlign: 'middle' }}>{kids(node.c).map((k, i) => <span key={i}>{k}</span>)}</span>
+    case 'assoc': return <>{(Array.isArray(node.c) ? node.c : []).map((pair, i) => (
+      <span key={i}>{i > 0 ? ', ' : ''}<LabelNode node={pair[0]} depth={depth + 1} />: <LabelNode node={pair[1]} depth={depth + 1} /></span>
+    ))}</>
+    case 'style': {
+      const style: CSSProperties = {}
+      if (node.bold) style.fontWeight = 600
+      if (node.italic) style.fontStyle = 'italic'
+      if (typeof node.color === 'string') style.color = node.color
+      if (typeof node.size === 'number') style.fontSize = `${Math.min(28, Math.max(8, node.size))}px`
+      return <span style={style}><LabelNode node={node.c} depth={depth + 1} /></span>
+    }
+    case 'sup': return <><LabelNode node={node.c[0]} depth={depth + 1} /><sup><LabelNode node={node.c[1]} depth={depth + 1} /></sup></>
+    case 'sub': return <><LabelNode node={node.c[0]} depth={depth + 1} /><sub><LabelNode node={node.c[1]} depth={depth + 1} /></sub></>
+    case 'subsup': return <><LabelNode node={node.c[0]} depth={depth + 1} /><sub><LabelNode node={node.c[1]} depth={depth + 1} /></sub><sup><LabelNode node={node.c[2]} depth={depth + 1} /></sup></>
+    case 'tip': return <span title={node.tip}><LabelNode node={node.c} depth={depth + 1} /></span>
+    case 'frame': return <span style={{ padding: '0 4px', borderRadius: 3, boxShadow: '0 0 0 1px color-mix(in srgb, currentColor 25%, transparent)' }}><LabelNode node={node.c} depth={depth + 1} /></span>
+    default: return null
+  }
+}
+
+/** A label: the tree when present, else the plain text. */
+function Label({ tree, text }: { tree: LabelTree | null | undefined, text: string }): ReactNode {
+  return tree ? <LabelNode node={tree} /> : <>{text}</>
+}
+
 // ---------------------------------------------------------------- Manipulate widget
 
 function manipulateUrl(sessionId: string, kernelId: string, id: string, values: ControlValue[]): string {
@@ -417,7 +461,7 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
           const disabled = dead !== undefined
           if (control.type === 'slider') {
             return (
-              <FragmentRow key={control.name} label={control.label}>
+              <FragmentRow key={control.name} label={<Label tree={control.labelTree} text={control.label} />}>
                 <input
                   type="range" min={control.min} max={control.max} step={control.step ?? 'any'} value={v as number} disabled={disabled}
                   onChange={(e) => preview(i, Number(e.target.value))}
@@ -431,7 +475,7 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
           }
           if (control.type === 'checkbox') {
             return (
-              <FragmentRow key={control.name} label={control.label}>
+              <FragmentRow key={control.name} label={<Label tree={control.labelTree} text={control.label} />}>
                 <input type="checkbox" checked={v === true} disabled={disabled} onChange={(e) => commit(i, e.target.checked)} style={{ justifySelf: 'start' }} />
                 <span />
               </FragmentRow>
@@ -439,7 +483,7 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
           }
           if (control.type === 'popup') {
             return (
-              <FragmentRow key={control.name} label={control.label}>
+              <FragmentRow key={control.name} label={<Label tree={control.labelTree} text={control.label} />}>
                 <select value={v as number} disabled={disabled} onChange={(e) => commit(i, Number(e.target.value))} style={{ font: 'inherit', fontSize: 12 }}>
                   {control.choices.map((choice, k) => <option key={k} value={k}>{choice}</option>)}
                 </select>
@@ -448,10 +492,10 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
             )
           }
           return (
-            <FragmentRow key={control.name} label={control.label}>
+            <FragmentRow key={control.name} label={<Label tree={control.labelTree} text={control.label} />}>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {control.choices.map((choice, k) => (
-                  <button key={k} type="button" disabled={disabled} style={v === k ? CHIP_ON : CHIP_STYLE} onClick={() => commit(i, k)}>{choice}</button>
+                  <button key={k} type="button" disabled={disabled} style={v === k ? CHIP_ON : CHIP_STYLE} onClick={() => commit(i, k)}><Label tree={control.choiceTrees[k]} text={choice} /></button>
                 ))}
               </div>
               <span />
@@ -496,10 +540,10 @@ function StatusRow({ timing, live, onOpen, opening }: { timing: ShowTiming | und
 }
 
 /** One grid row: label, control, readout. */
-function FragmentRow({ label, children }: { label: string, children: ReactNode }) {
+function FragmentRow({ label, children }: { label: ReactNode, children: ReactNode }) {
   return (
     <>
-      <span style={{ opacity: 0.8, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>{label}</span>
+      <span style={{ opacity: 0.85 }}>{label}</span>
       {children}
     </>
   )
@@ -555,10 +599,23 @@ function KernelRow({ title, summary, state, defaultOpen, children }: { title: st
 
 // ---------------------------------------------------------------- wolfram_show
 
+/** Label content tree emitted by kernel/DSHPlugin.wl labelTree (untrusted JSON; rendered defensively). */
+type LabelTree =
+  | { t: 's' | 'code', v: string }
+  | { t: 'color', css: string, v: string }
+  | { t: 'list' | 'col', c: LabelTree[] }
+  | { t: 'row', c: LabelTree[], sep: LabelTree | null }
+  | { t: 'assoc', c: [LabelTree, LabelTree][] }
+  | { t: 'style', c: LabelTree, bold?: boolean, italic?: boolean, color?: string, size?: number }
+  | { t: 'sup' | 'sub', c: [LabelTree, LabelTree] }
+  | { t: 'subsup', c: [LabelTree, LabelTree, LabelTree] }
+  | { t: 'tip', c: LabelTree, tip: string }
+  | { t: 'frame', c: LabelTree }
+
 type ManipulateControl =
-  | { name: string, label: string, type: 'slider', min: number, max: number, step: number | null, init: number }
-  | { name: string, label: string, type: 'checkbox', init: boolean }
-  | { name: string, label: string, type: 'setter' | 'popup', choices: string[], init: number }
+  | { name: string, label: string, labelTree: LabelTree | null, type: 'slider', min: number, max: number, step: number | null, init: number }
+  | { name: string, label: string, labelTree: LabelTree | null, type: 'checkbox', init: boolean }
+  | { name: string, label: string, labelTree: LabelTree | null, type: 'setter' | 'popup', choices: string[], choiceTrees: (LabelTree | null)[], init: number }
 interface ManipulateDescriptor { id: string, controls: ManipulateControl[] }
 type ControlValue = number | boolean
 
@@ -575,12 +632,15 @@ function asManipulate(value: unknown): ManipulateDescriptor | undefined {
   for (const c of value.controls) {
     if (!isRecord(c) || typeof c.name !== 'string') return undefined
     const label = typeof c.label === 'string' ? c.label : c.name
+    const labelTree = isRecord(c.labelTree) ? (c.labelTree as unknown as LabelTree) : null
     if (c.type === 'slider' && typeof c.min === 'number' && typeof c.max === 'number' && typeof c.init === 'number') {
-      controls.push({ name: c.name, label, type: 'slider', min: c.min, max: c.max, step: typeof c.step === 'number' ? c.step : null, init: c.init })
+      controls.push({ name: c.name, label, labelTree, type: 'slider', min: c.min, max: c.max, step: typeof c.step === 'number' ? c.step : null, init: c.init })
     } else if (c.type === 'checkbox') {
-      controls.push({ name: c.name, label, type: 'checkbox', init: c.init === true })
+      controls.push({ name: c.name, label, labelTree, type: 'checkbox', init: c.init === true })
     } else if ((c.type === 'setter' || c.type === 'popup') && Array.isArray(c.choices) && c.choices.every(x => typeof x === 'string') && typeof c.init === 'number') {
-      controls.push({ name: c.name, label, type: c.type, choices: c.choices as string[], init: c.init })
+      const choices = c.choices as string[]
+      const choiceTrees = Array.isArray(c.choiceTrees) && c.choiceTrees.length === choices.length ? c.choiceTrees.map(x => (isRecord(x) ? (x as unknown as LabelTree) : null)) : choices.map(() => null)
+      controls.push({ name: c.name, label, labelTree, type: c.type, choices, choiceTrees, init: c.init })
     } else return undefined
   }
   return { id: value.id, controls }
