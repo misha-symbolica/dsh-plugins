@@ -8,6 +8,14 @@
  *   wolfram_eval   text output plus any image blocks the result carries
  *   wolfram_run    (same row as wolfram_eval)
  *
+ * plus a PINNED GALLERY under each turn's final answer: in the default
+ * "compact" transcript view the chat folds a settled turn's tool rows into a
+ * "N tool calls" disclosure, which would hide the very image wolfram_show
+ * exists to show. The turn-tail node (`conversation.chat.turnTail` chain) is
+ * never folded, so a turn-scoped event accumulator collects every successful
+ * wolfram_show of the turn (from the tool/result events' presentationMeta) and
+ * the gallery renders them there, at point size. Pattern: ui-deliverables.
+ *
  * Why a toolview: the generic tool card flattens non-text result blocks to
  * JSON, and image rendering is only possible from a keyed entry
  * (<checkout>/.agents/notes/implemented/feature/2026-08-20-tool-card-image-results.md).
@@ -27,7 +35,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsRuntime, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
+import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { DisclosureRow, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CSSProperties, ReactNode } from 'react'
 import { useEffect, useState } from 'react'
@@ -119,22 +129,35 @@ function stateOf(block: Block): RowState {
 
 // ---------------------------------------------------------------- image loading
 
-/** Resolve an attachment to a session-authorized URL; `peek` gives a cached one synchronously. */
-function useImageUrl(loadImage: LoadImage, ref: ImageRef | undefined): { url: string | undefined, failed: boolean } {
-  const [url, setUrl] = useState<string | undefined>(() => (ref !== undefined ? loadImage.peek?.(ref as never) : undefined))
+/** Same-origin URL of the plugin's own image route (host: index.js SHOWN_IMAGE_PATH). The browser sends the auth cookie. */
+function shownImageUrl(sessionId: string, image: ImageRef): string {
+  return `/api/wolfram/shown?sessionId=${encodeURIComponent(sessionId)}&attachmentId=${encodeURIComponent(image.attachmentId)}`
+}
+
+/**
+ * Resolve an image to a displayable URL. A wolfram_show image (referenced only
+ * by presentationMeta) comes from the plugin route; a content-block image (a
+ * wolfram_eval plot the model also received) goes through the session loader,
+ * which the core authorizes from the log's content blocks.
+ */
+function useImageUrl(source: { url: string } | { loadImage: LoadImage }, image: ImageRef): { url: string | undefined, failed: boolean } {
+  const direct = 'url' in source ? source.url : undefined
+  const loader = 'loadImage' in source ? source.loadImage : undefined
+  const [url, setUrl] = useState<string | undefined>(() => direct ?? loader?.peek?.(image as never))
   const [failed, setFailed] = useState(false)
-  const id = ref?.attachmentId
+  const id = image.attachmentId
   useEffect(() => {
-    if (ref === undefined) return
+    if (direct !== undefined) { setUrl(direct); return }
+    if (loader === undefined) return
     let cancelled = false
     setFailed(false)
-    loadImage(ref as never).then(
+    loader(image as never).then(
       (resolved) => { if (!cancelled) setUrl(resolved) },
       () => { if (!cancelled) setFailed(true) },
     )
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, loadImage])
+  }, [id, direct, loader])
   return { url, failed }
 }
 
@@ -148,19 +171,23 @@ const IMAGE_FRAME: CSSProperties = {
   boxSizing: 'border-box',
 }
 
-function WolframImage({ loadImage, ref, pointWidth, alt, path }: { loadImage: LoadImage, ref: ImageRef, pointWidth: number | undefined, alt: string, path: string | undefined }) {
-  const { url, failed } = useImageUrl(loadImage, ref)
-  const width = pointWidth ?? ref.width
-  if (failed) return <div style={{ opacity: 0.7, fontSize: 12 }}>[image unavailable{path ? `: ${path}` : ''}]</div>
-  if (url === undefined) return <div style={{ ...IMAGE_FRAME, width, aspectRatio: `${ref.width} / ${ref.height}`, opacity: 0.4 }} />
+// NB: the reference prop is `image`, not `ref` — React reserves `ref` and
+// strips it from a function component's props (it arrived undefined).
+function WolframImage({ source, image, pointWidth, alt, path }: { source: { url: string } | { loadImage: LoadImage }, image: ImageRef, pointWidth: number | undefined, alt: string, path: string | undefined }) {
+  const { url, failed } = useImageUrl(source, image)
+  const [broken, setBroken] = useState(false)
+  const width = pointWidth ?? image.width
+  if (failed || broken) return <div style={{ opacity: 0.7, fontSize: 12 }}>[image unavailable{path ? `: ${path}` : ''}]</div>
+  if (url === undefined) return <div style={{ ...IMAGE_FRAME, width, aspectRatio: `${image.width} / ${image.height}`, opacity: 0.4 }} />
   return (
     <span style={IMAGE_FRAME}>
       <img
         src={url}
         alt={alt}
         width={width}
-        style={{ display: 'block', width, maxWidth: '100%', height: 'auto' }}
+        style={{ display: 'block', width, maxWidth: '100%', height: 'auto', cursor: 'zoom-in' }}
         onClick={() => { window.open(url, '_blank', 'noopener') }}
+        onError={() => setBroken(true)}
         title={path ?? alt}
       />
     </span>
@@ -192,6 +219,10 @@ function leading(state: RowState): ReactNode {
 
 function KernelRow({ title, summary, state, defaultOpen, children }: { title: string, summary: string, state: RowState, defaultOpen: boolean, children: ReactNode }) {
   const [open, setOpen] = useState(defaultOpen)
+  // A row mounts while its call is running (defaultOpen false) and must open
+  // itself once the result carries an image; the user's own toggle wins after.
+  const [touched, setTouched] = useState(false)
+  useEffect(() => { if (defaultOpen && !touched) setOpen(true) }, [defaultOpen, touched])
   const expandable = children !== null && children !== undefined && children !== false
   return (
     <div style={ROW_STYLE} data-tool-state={state}>
@@ -202,7 +233,7 @@ function KernelRow({ title, summary, state, defaultOpen, children }: { title: st
         expandable={expandable}
         expandOnRowClick
         keepContentWhenOpen
-        onToggle={() => setOpen(v => !v)}
+        onToggle={() => { setTouched(true); setOpen(v => !v) }}
         collapsedContent={summary !== '' ? <span style={SUMMARY_STYLE}>{summary}</span> : undefined}
       >
         <div style={BODY_STYLE}>{children}</div>
@@ -244,7 +275,7 @@ function firstLine(s: string, max = 80): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
-export function WolframShowRow({ block, loadImage }: Props) {
+export function WolframShowRow({ block, loadImage, sessionId }: Props) {
   const state = stateOf(block)
   const args = parseArgs(block)
   const expression = typeof args.expression === 'string' ? args.expression : ''
@@ -260,7 +291,7 @@ export function WolframShowRow({ block, loadImage }: Props) {
     : ref !== undefined
       ? (
         <>
-          <WolframImage loadImage={loadImage} ref={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />
+          <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />
           {(meta?.label || meta?.path) && (
             <div style={{ fontSize: 12, opacity: 0.7 }}>
               {meta?.label ? <span>{meta.label}</span> : null}
@@ -300,17 +331,138 @@ export function WolframEvalRow({ toolName, block, loadImage }: Props) {
       {state !== 'running' && output !== '' && (
         <pre style={{ ...PRE_STYLE, opacity: 0.85, borderLeft: '2px solid color-mix(in srgb, currentColor 20%, transparent)', paddingLeft: 8 }}>{output}</pre>
       )}
-      {refs.map((ref) => <WolframImage key={ref.attachmentId} loadImage={loadImage} ref={ref} pointWidth={Math.round(ref.width / 2)} alt="Wolfram graphics" path={undefined} />)}
+      {refs.map((ref) => <WolframImage key={ref.attachmentId} source={{ loadImage }} image={ref} pointWidth={Math.round(ref.width / 2)} alt="Wolfram graphics" path={undefined} />)}
     </KernelRow>
+  )
+}
+
+// ---------------------------------------------------------------- pinned gallery (turn tail)
+
+/** One successful wolfram_show of a turn, as the tool/result event recorded it. */
+interface ShownImage {
+  readonly seq: number
+  readonly callId: string
+  readonly meta: ShowMeta & { attachment: ImageRef }
+}
+
+export interface WolframShownTurnData {
+  readonly shown: readonly ShownImage[]
+}
+
+declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
+  interface ConversationTurnDataMap {
+    wolframShown: WolframShownTurnData
+  }
+}
+
+interface WolframShownState extends WolframShownTurnData {
+  readonly turn: number
+  /** callId → tool name, so a result can be attributed to wolfram_show. */
+  readonly calls: ReadonlyMap<string, string>
+}
+
+/** Narrow one tool/result event's presentationMeta into a gallery entry. */
+function shownFromMeta(meta: unknown): (ShowMeta & { attachment: ImageRef }) | undefined {
+  if (!isRecord(meta)) return undefined
+  const attachment = asImageRef(meta.attachment)
+  if (attachment === undefined) return undefined
+  const dims = (v: unknown) => (isRecord(v) && positiveInt(v.width) && positiveInt(v.height) ? { width: v.width, height: v.height } : undefined)
+  return {
+    attachment,
+    points: dims(meta.points),
+    devicePixels: dims(meta.devicePixels),
+    scale: typeof meta.scale === 'number' ? meta.scale : undefined,
+    path: typeof meta.path === 'string' ? meta.path : null,
+    label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
+    kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
+  }
+}
+
+/** Turn-local accumulator of shown images; publishes no view node, only turn data. */
+const wolframShownDefinition: ConversationNodeDefinition<WolframShownState> = {
+  kind: 'wolframShown', // must equal the Location data key below (the engine enforces it)
+  match: (event) => {
+    if (event.type === 'turn/start') return { id: String((event.data as { turn: number }).turn), role: 'start' }
+    if (event.type === 'tool/call' || event.type === 'tool/result') return { id: String((event.data as { turn: number }).turn), role: 'update' }
+    return null
+  },
+  start: (_context, match) => {
+    if (match.event.type !== 'turn/start') throw new Error('wolframShown start requires turn/start')
+    return { turn: (match.event.data as { turn: number }).turn, calls: new Map(), shown: [] }
+  },
+  update: (context, match) => {
+    const event = match.event as { type: string, seq: number, data: Record<string, unknown> }
+    if (event.type === 'tool/call') {
+      const calls = new Map(context.state.calls)
+      calls.set(String(event.data.callId), String(event.data.name))
+      return { ...context.state, calls }
+    }
+    if (event.type !== 'tool/result') return context.state
+    const message = event.data.message as { source?: { callId?: unknown }, content?: { isError?: boolean }[] } | undefined
+    const callId = String(message?.source?.callId ?? '')
+    if (context.state.calls.get(callId) !== 'wolfram_show') return context.state
+    if (message?.content?.[0]?.isError === true) return context.state
+    const meta = shownFromMeta(event.data.meta)
+    if (meta === undefined) return context.state
+    return { ...context.state, shown: [...context.state.shown, { seq: event.seq, callId, meta }] }
+  },
+  buildLocationData: (context, scope, previous) => {
+    if (scope !== 'turn' || context.state === undefined) return null
+    if (previous?.kind === 'turn'
+      && previous.turn === context.state.turn
+      && previous.key === 'wolframShown'
+      && (previous.value as WolframShownTurnData).shown === context.state.shown) return previous
+    return { kind: 'turn', turn: context.state.turn, key: 'wolframShown', value: { shown: context.state.shown } }
+  },
+}
+
+/** Claim the turn tail only when the closing turn showed something (up to the closing seq). */
+function selectShown(owner: TurnTailOwnerProps): readonly ShownImage[] | null {
+  const data = owner.turn.data.get('wolframShown')
+  if (data === undefined) return null
+  const shown = data.shown.filter(s => s.seq <= owner.seq)
+  return shown.length === 0 ? null : shown
+}
+
+type GalleryInjected = { sessionId: string }
+type GalleryProps = Pick<TurnTailOwnerProps, 'openFile'> & { matched: readonly ShownImage[] } & InjectFace<GalleryInjected>
+
+const GALLERY_STYLE: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start', padding: '4px 0 8px' }
+
+/** The turn's shown images, pinned under the final answer (never folded away). */
+function ShownGallery({ matched, sessionId }: GalleryProps) {
+  return (
+    <div style={GALLERY_STYLE} data-wolfram-shown={matched.length}>
+      {matched.map((item) => (
+        <figure key={item.callId} style={{ margin: 0, display: 'flex', flexDirection: 'column', gap: 4, maxWidth: '100%' }}>
+          <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />
+          {(item.meta.label || item.meta.path) && (
+            <figcaption style={{ fontSize: 12, opacity: 0.7 }}>
+              {item.meta.label ?? ''}
+              {item.meta.label && item.meta.path ? ' · ' : ''}
+              {item.meta.path ? <code style={{ fontSize: 11 }}>{item.meta.path}</code> : null}
+            </figcaption>
+          )}
+        </figure>
+      ))}
+    </div>
   )
 }
 
 // ---------------------------------------------------------------- plugin
 
 export const name = 'wolfram-kernel-supervisor-client'
-export const inject = ['slots']
+export const inject = ['slots', 'uiConversation']
 
 export function apply(ctx: Context): void {
+  // Turn-scoped accumulator feeding the pinned gallery (registration unwinds with the plugin).
+  ctx.uiConversation.events.register(wolframShownDefinition)
+  ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+    name: 'conversation.chat.turnTail',
+    select: selectShown,
+    inject: (sessionId): GalleryInjected => ({ sessionId: String(sessionId) }),
+  }, ShownGallery))
+
   // The callback returns the registrations' disposers so they unwind with the
   // slot owner (and re-register when it is mounted again).
   ctx.slots.inject('tool.call.toolview', () => [

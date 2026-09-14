@@ -133,7 +133,7 @@ export function createTools(deps, fallbackAgent) {
     name: 'wolfram_kernel_open',
     description: 'Start a NEW Wolfram Language kernel for this chat and make it the default. Returns its id (wl:<session>:<kernel>). Kernels are isolated per chat session (subagents get their own); each has independent definitions and state. You rarely need this: wolfram_eval / wolfram_run / wolfram_show start one automatically. Use it to run several independent kernels side by side, or to get a clean state.',
     parameters: { label: { type: 'string', description: 'Optional human label shown in wolfram_kernel_list.' } },
-    output: objectOutput(v => `Opened kernel ${v.kernelId}${v.label ? ` (${v.label})` : ''} in ${v.startupMs} ms (pid ${v.pid}, evaluator pid ${v.sandboxPid}, cwd ${v.cwd}). It is now this chat's default kernel.`),
+    output: objectOutput(v => `Opened kernel ${v.kernelId}${v.label ? ` (${v.label})` : ''} in ${v.startupMs} ms (pid ${v.pid}, cwd ${v.cwd}). It is now this chat's default kernel.`),
     async execute(args, exec) {
       const kernel = await sessions.open(agentOf(exec), args.label)
       return { kernelId: kernel.id, label: kernel.label, pid: kernel.pid ?? 0, sandboxPid: kernel.sandboxPid ?? 0, cwd: kernel.cwd, startupMs: kernel.startupMs }
@@ -221,7 +221,8 @@ export function createTools(deps, fallbackAgent) {
       try { if (!(await stat(path)).isFile()) throw new Error('not a file') } catch { throw new Error(`No script at ${path}.`) }
       const { kernel, opened } = await sessions.resolve(agent, args.kernelId)
       const argv = [path, ...(args.args ?? [])].map(wlString).join(', ')
-      const code = `$ScriptCommandLine = {${argv}}; Get[${wlString(path)}]`
+      // $ScriptCommandLine is Protected in the evaluator kernel (Set::wrsym otherwise).
+      const code = `Unprotect[$ScriptCommandLine]; $ScriptCommandLine = {${argv}}; Protect[$ScriptCommandLine]; Get[${wlString(path)}]`
       const { text, images } = await evaluate(kernel, code, { timeConstraint: args.timeConstraint })
       const admitted = await admitAll(exec, images, `wolfram-run-${Date.now()}`)
       return { kernelId: kernel.id, opened, startupMs: kernel.startupMs, path, output: text, ...admitted }
@@ -308,7 +309,7 @@ export function createTools(deps, fallbackAgent) {
 
 /** Text table for wolfram_kernel_list. */
 function renderList(v) {
-  const row = (k) => `${k.kernelId}${k.default ? ' *' : ''}${k.label ? ` "${k.label}"` : ''}  pid ${k.pid} (evaluator ${k.sandboxPid})  ${k.alive ? 'alive' : 'DEAD'}  started ${k.startedAt}  idle ${k.idleSeconds}s  evals ${k.evalCount}  cwd ${k.cwd}`
+  const row = (k) => `${k.kernelId}${k.default ? ' *' : ''}${k.label ? ` "${k.label}"` : ''}  pid ${k.pid}${k.sandboxPid && k.sandboxPid !== k.pid ? ` (evaluator ${k.sandboxPid})` : ''}  ${k.starting ? 'starting' : k.alive ? 'alive' : 'DEAD'}  started ${k.startedAt}  idle ${k.idleSeconds}s  evals ${k.evalCount}  cwd ${k.cwd}`
   const lines = []
   if (v.session === null || v.kernels.length === 0) lines.push('This chat has no Wolfram kernel running (the next wolfram_* call starts one).')
   else lines.push(`This chat (session ${v.session}), * = default:`, ...v.kernels.map(row))

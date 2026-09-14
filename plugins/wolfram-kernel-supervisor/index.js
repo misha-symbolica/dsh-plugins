@@ -14,6 +14,16 @@
  * `presentationMeta` (the browser half, src/client, renders it inline at
  * point size) and give the model one line of text.
  *
+ * IMAGE ROUTE. The GUI reads durable attachments only after the core proves
+ * the session log references them in a *content* image block; a reference
+ * that lives solely in presentationMeta (the user-only path) is invisible to
+ * that check ("Image is not referenced by this session"). So this plugin
+ * serves its own images: GET /api/wolfram/shown?sessionId=…&attachmentId=…
+ * (registered through ctx.connection.fetch, behind the normal browser auth),
+ * authorized by proving the session's log holds a wolfram_show result whose
+ * meta.attachment carries that id — live or cold session, so it survives
+ * server restarts.
+ *
  * LIFECYCLE. Nothing is spawned until a tool needs it. A per-session idle
  * timer (`idleMinutes`, reset by every call) closes the session's kernels and
  * injects a notice; agent disposal and plugin unload close everything. The
@@ -43,7 +53,7 @@ import { createTools } from './tools.mjs'
 
 export const name = 'wolfram-kernel-supervisor'
 
-export const inject = ['agents', 'tools']
+export const inject = ['agents', 'tools', 'connection']
 
 export const Config = Schema.object({
   kernel: Schema.string().default(''),
@@ -61,6 +71,8 @@ export const Config = Schema.object({
 })
 
 const PLUGIN_SOURCE = { kind: 'plugin', plugin: 'wolfram-kernel-supervisor' }
+/** Exact Fetch route (below /api) that serves wolfram_show images to the GUI. Mirrored in src/client. */
+export const SHOWN_IMAGE_PATH = '/api/wolfram/shown'
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx - host-plane plugin context.
@@ -149,6 +161,60 @@ export function apply(ctx, config) {
     sessions, admitImage, storeImage, labelOf: chatLabel, trace,
     config: { resolution: config.resolution, writeFiles: config.writeFiles, showDirectory: config.showDirectory },
   }
+
+
+  // ---------------------------------------------------------------- shown-image route
+
+  /** Whether the session's log holds a wolfram_show result whose meta references the attachment. */
+  async function sessionShows(sessionId, attachmentId) {
+    const live = ctx.get('sessions')?.get?.(sessionId)
+    let events
+    let observation
+    if (live !== undefined) {
+      events = live.snapshotEvents()
+    } else {
+      const query = ctx.get('sessionQuery')
+      if (query === undefined) return undefined
+      try {
+        observation = await query.observeSession(sessionId, { projectionMode: 'none' })
+        events = observation.events
+      } catch {
+        return undefined
+      }
+    }
+    try {
+      for (const event of events) {
+        if (event.type !== 'tool/result') continue
+        const meta = event.data?.meta
+        const ref = meta?.attachment
+        if (ref && typeof ref === 'object' && String(ref.attachmentId) === attachmentId) return ref
+      }
+      return undefined
+    } finally {
+      observation?.[Symbol.dispose]?.()
+      await observation?.[Symbol.asyncDispose]?.()
+    }
+  }
+
+  ctx.connection.fetch.register({
+    path: SHOWN_IMAGE_PATH,
+    methods: ['GET', 'HEAD'],
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      const sessionId = url.searchParams.get('sessionId') ?? ''
+      const attachmentId = url.searchParams.get('attachmentId') ?? ''
+      if (sessionId === '' || attachmentId === '') return new Response('missing sessionId or attachmentId', { status: 400 })
+      const attachments = ctx.get('attachments')
+      if (attachments === undefined) return new Response('no attachment store', { status: 500 })
+      const ref = await sessionShows(sessionId, attachmentId)
+      if (ref === undefined) return new Response('image is not a wolfram_show result of this session', { status: 404 })
+      let stored
+      try { stored = await attachments.readImage(ref) } catch (error) { return new Response(`attachment read failed: ${error instanceof Error ? error.message : String(error)}`, { status: 404 }) }
+      const headers = { 'content-type': stored.ref.mediaType, 'content-length': String(stored.data.byteLength), 'cache-control': 'private, max-age=31536000, immutable' }
+      if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
+      return new Response(stored.data, { status: 200, headers })
+    },
+  })
 
   /** Plugin-owned disposer of each attached agent's scoped tool registrations. */
   const attached = new Map()
