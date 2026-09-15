@@ -131,7 +131,12 @@ not on the sandbox kernel's context path.)
    "N tool calls" once the turn ends, a turn-scoped accumulator
    (`ConversationNodeDefinition`, kind `wolframShown`) also collects the
    turn's shows and a `conversation.chat.turnTail` chain entry renders them
-   as a pinned gallery under the final answer (never folded).
+   as a pinned gallery under the final answer (never folded). The gallery
+   skips debug artefacts — renders flagged `errorImage` (pink error box)
+   and pixel-identical re-shows (same content-addressed `attachmentId`,
+   e.g. `see: true` on an image already displayed) — so a model that
+   retries a broken plot pins only the good one; every attempt still
+   has its tool row.
 3. Captions are links: click → `GET /api/wolfram/open?path=` (paths under `showDirectory` only) → `open` in the system viewer.
 4. Bytes: the core's attachment read authorizes only references found in
    *content* image blocks, so meta-only references 404. The host registers

@@ -900,6 +900,11 @@ const wolframShownDefinition: ConversationNodeDefinition<WolframShownState> = {
     if (message?.content?.[0]?.isError === true) return context.state
     const meta = shownFromMeta(event.data.meta)
     if (meta === undefined) return context.state
+    // Debug artefacts stay in the folded tool rows only: a render containing a pink error box
+    // (the host flags it and the model usually retries), and a pixel-identical re-show (same
+    // content-addressed attachment, e.g. `see: true` to inspect what was already displayed).
+    if (meta.errorImage) return context.state
+    if (context.state.shown.some(s => s.meta.attachment.attachmentId === meta.attachment.attachmentId)) return context.state
     return { ...context.state, shown: [...context.state.shown, { seq: event.seq, callId, meta }] }
   },
   buildLocationData: (context, scope, previous) => {
