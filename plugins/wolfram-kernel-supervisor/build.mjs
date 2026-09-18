@@ -1,5 +1,5 @@
 /**
- * Browser-half bundle build (copy of agent-status-indicator/build.mjs).
+ * Browser-half bundle build (esbuild; the reference client-bundle build in this repo).
  * Produces lib/client.js in the artifact format the DSH web shell loads:
  *
  *   window.__ModuleLoader__.load({ id: '<package name>', factory: (require) => {
