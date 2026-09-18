@@ -24,8 +24,9 @@
  * plus a PINNED GALLERY under each turn's final answer: in the default
  * "compact" transcript view the chat folds a settled turn's tool rows into a
  * "N tool calls" disclosure, which would hide the very image wolfram_show
- * exists to show. The turn-tail node (`conversation.chat.turnTail` chain) is
- * never folded, so a turn-scoped event accumulator collects every successful
+ * exists to show. The turn-tail node (`conversation.chat.turnTail`, a `list`
+ * slot since DSH 0.1.6-alpha.2 — it was a `chain` before, whose `select`
+ * claimed the tail) is never folded, so a turn-scoped event accumulator collects every successful
  * wolfram_show of the turn (from the tool/result events' presentationMeta) and
  * the gallery renders them there, at point size. Pattern: ui-deliverables.
  *
@@ -924,8 +925,8 @@ const wolframShownDefinition: ConversationNodeDefinition<WolframShownState> = {
   },
 }
 
-/** Claim the turn tail only when the closing turn showed something (up to the closing seq). */
-function selectShown(owner: TurnTailOwnerProps): readonly ShownImage[] | null {
+/** The closing turn's shown images (up to the closing seq), or null when it showed nothing. */
+function selectShown(owner: Pick<TurnTailOwnerProps, 'turn' | 'seq'>): readonly ShownImage[] | null {
   const data = owner.turn.data.get('wolframShown')
   if (data === undefined) return null
   const shown = data.shown.filter(s => s.seq <= owner.seq)
@@ -933,12 +934,22 @@ function selectShown(owner: TurnTailOwnerProps): readonly ShownImage[] | null {
 }
 
 type GalleryInjected = { sessionId: string }
-type GalleryProps = { matched: readonly ShownImage[] } & InjectFace<GalleryInjected>
+/**
+ * Props under both slot contracts: the `list` slot (DSH ≥ 0.1.6-alpha.2) hands
+ * the entry the owner currency (`turn`, `seq`); the older `chain` slot hands it
+ * the `select` result as `matched`. The registration below carries both `id`
+ * and `select`, so one bundle serves either DSH.
+ */
+type GalleryProps = Partial<Pick<TurnTailOwnerProps, 'turn' | 'seq'>>
+  & { matched?: readonly ShownImage[] | undefined }
+  & InjectFace<GalleryInjected>
 
 const GALLERY_STYLE: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start', padding: '4px 0 8px' }
 
-/** The turn's shown images, pinned under the final answer (never folded away). */
-function ShownGallery({ matched, sessionId }: GalleryProps) {
+/** The turn's shown images, pinned under the final answer (never folded away); null for a turn that showed nothing. */
+function ShownGallery({ turn, seq, matched: preselected, sessionId }: GalleryProps) {
+  const matched = preselected ?? (turn !== undefined && seq !== undefined ? selectShown({ turn, seq }) : null)
+  if (matched === null || matched.length === 0) return null
   return (
     <div style={GALLERY_STYLE} data-wolfram-shown={matched.length}>
       {matched.map((item) => (
@@ -965,9 +976,12 @@ export function apply(ctx: Context): void {
   ctx.uiConversation.events.register(wolframShownDefinition)
   ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
     name: 'conversation.chat.turnTail',
+    // `id` for the list slot (current DSH), `select` for the chain slot it was
+    // before 0.1.6-alpha.2; each DSH reads the option it requires.
+    id: 'wolfram-shown-gallery',
     select: selectShown,
-    inject: (sessionId): GalleryInjected => ({ sessionId: String(sessionId) }),
-  }, ShownGallery))
+    inject: (sessionId: unknown): GalleryInjected => ({ sessionId: String(sessionId) }),
+  } as never, ShownGallery as never))
 
   // The callback returns the registrations' disposers so they unwind with the
   // slot owner (and re-register when it is mounted again).
