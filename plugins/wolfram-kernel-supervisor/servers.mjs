@@ -147,6 +147,12 @@ class KernelTransport {
     })
     proc.on('error', (error) => { this.onerror?.(error) })
     proc.stdout.on('data', (chunk) => {
+      // A kernel that cannot start talks on STDOUT, not stderr ("No valid password found."
+      // for an unactivated macOS user, 2026-09-21), then exits — the MCP framing sees no
+      // message and the connect fails with a bare "Connection closed". Keep a tail of
+      // non-JSON stdout so the failure can name the cause.
+      const text = String(chunk)
+      if (!/^\s*(\{|Content-Length:)/.test(text)) this.stderrTail = (this.stderrTail + text).slice(-4000)
       this.buffer.append(chunk)
       for (;;) {
         let message

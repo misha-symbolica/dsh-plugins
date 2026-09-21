@@ -22,7 +22,7 @@ export const WOLFRAM_INSTALL_REMEDY = `${ASK_USER}install Wolfram (Mathematica 1
  */
 export function kernelStartRemedy(detail) {
   if (/licen[cs]e|activation|password|expired|Mathematica cannot find a valid|not activated|Wolfram ID/i.test(detail)) {
-    return `${ASK_USER}the Wolfram kernel has no valid licence on this machine. Open Wolfram (Mathematica) once and complete activation (sign in with a Wolfram ID or enter the activation key), or run \`wolframscript -activate\` in a terminal, then retry.`
+    return `${ASK_USER}the Wolfram kernel has no valid licence for THIS macOS user (activation is per user account, not per machine — another account on the same Mac being activated does not help). Sign in once: open Wolfram (Mathematica) in this account and complete activation (Wolfram ID or activation key), or run \`wolframscript -activate\` in a terminal as this user, then retry.`
   }
   if (/AgentTools|PacletDirectoryLoad|StartMCPServer/i.test(detail)) {
     return `${ASK_USER}the Wolfram\`AgentTools\` paclet is missing or outdated. In Wolfram (15+) evaluate PacletInstall["Wolfram/AgentTools"], or update the app, then retry.`
