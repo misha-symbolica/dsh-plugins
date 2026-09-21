@@ -57,6 +57,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { WolframKernelCard, type KernelSettings } from './kernel-card.tsx'
 import { Scene3DView, isScene3D, type Scene3D } from './scene3d.tsx'
+// Re-exported so a harness page can drive the renderer from the built bundle (no DSH shell needed).
+export { SceneRenderer } from './scene3d.tsx'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { DisclosureRow, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CSSProperties, ReactNode } from 'react'

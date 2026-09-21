@@ -108,7 +108,10 @@ export class SceneRenderer {
   private readonly labels: CSS2DRenderer
   private readonly three = new THREE.Scene()
   private readonly camera: THREE.PerspectiveCamera
-  private readonly controls: OrbitControls
+  /** Created in setScene, AFTER camera.up is set: OrbitControls bakes `camera.up` into a private
+   *  quaternion in its constructor, so controls built for the default y-up camera orbit a z-up one
+   *  with swapped axes (vertical drag spun the plot around z — the first live bug). */
+  private controls: OrbitControls | null = null
   private root: THREE.Group | null = null
   private box: THREE.Group | null = null
   private tickGroup: THREE.Group | null = null
@@ -134,16 +137,13 @@ export class SceneRenderer {
     Object.assign(this.labels.domElement.style, { position: 'absolute', top: '0', left: '0', pointerEvents: 'none' })
     container.appendChild(this.labels.domElement)
     this.camera = new THREE.PerspectiveCamera(35, options.width / options.height, 0.01, 100)
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement)
-    this.controls.enableDamping = false
-    this.controls.addEventListener('change', () => { this.drawAxes(); this.render() })
     this.renderer.setAnimationLoop(() => this.render())
   }
 
   dispose(): void {
     this.disposed = true
     this.renderer.setAnimationLoop(null)
-    this.controls.dispose()
+    this.controls?.dispose()
     this.clearGraph()
     this.renderer.dispose()
     this.renderer.domElement.remove()
@@ -219,11 +219,17 @@ export class SceneRenderer {
       this.lights.push({ light, spec })
     }
 
-    if (!keepCamera || !this.controls.target) {
+    if (!keepCamera || this.controls === null) {
       this.camera.up.copy(v3(scene.view.vertical).normalize())
       this.camera.position.copy(v3(scene.view.point))
-      this.controls.target.set(0, 0, 0)
       this.camera.lookAt(0, 0, 0)
+      // (Re)build the controls now that `up` is final: a fresh camera needs a fresh orbit frame.
+      this.controls?.dispose()
+      this.controls = new OrbitControls(this.camera, this.renderer.domElement)
+      this.controls.enableDamping = false
+      this.controls.target.set(0, 0, 0)
+      this.controls.addEventListener('change', () => { this.drawAxes(); this.render() })
+      this.controls.update()
     }
     this.fitCamera(!keepCamera)
     this.tickGroup = new THREE.Group()
