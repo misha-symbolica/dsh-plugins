@@ -71,6 +71,8 @@
  *   theme: auto                # auto | light | dark — kernels render graphics for this appearance; auto follows
  *                              # DSH's Settings ▸ Appearance (ui-theme), resolving "system" via macOS AppleInterfaceStyle
  *   subagents: true            # delegated child agents get the tools too (each its own session)
+ *   skipPresets: [minimal, minimal-no-tools]   # agent presets that never get these tools (chat-only compositions
+ *                              # for tiny local models; tools.restrict() cannot hide scoped registrations)
  *   idleMinutes: 60            # close a session's kernels after this long unused (0 = never)
  *   maxKernelsPerSession: 4
  *   maxKernelsGlobal: 12
@@ -93,7 +95,7 @@ import { createShowCore, createTools, parseShowReport, pngSize, showPresentation
 
 export const name = 'wolfram-kernel-supervisor'
 
-export const inject = ['agents', 'tools', 'connection', 'commands']
+export const inject = ['agents', 'tools', 'connection', 'commands', 'sessionProjections']
 
 export const Config = Schema.object({
   kernel: Schema.string().default(''),
@@ -105,6 +107,7 @@ export const Config = Schema.object({
   showDirectory: Schema.string().default('~/Library/Wolfram/DeepseekHarness'),
   theme: Schema.union(['auto', 'light', 'dark']).default('auto'),
   subagents: Schema.boolean().default(true),
+  skipPresets: Schema.array(Schema.string()).default(['minimal', 'minimal-no-tools']),
   idleMinutes: Schema.number().min(0).default(60),
   maxKernelsPerSession: Schema.number().min(1).default(4),
   maxKernelsGlobal: Schema.number().min(1).default(12),
@@ -539,6 +542,8 @@ export function apply(ctx, config) {
     if (attached.has(agent)) return
     const depth = agent.session.header?.delegationDepth ?? 0
     if (depth > 0 && !config.subagents) return
+    const preset = presetOf(agent)
+    if (config.skipPresets.includes(preset)) { trace({ event: 'skip', id: agent.id, preset }); return }
     const dispose = ctx.effect(() => {
       const disposers = createTools(deps, agent).map(tool => agent.ctx.tools.register(tool))
       return () => { for (const dispose of disposers) dispose() }
@@ -547,6 +552,32 @@ export function apply(ctx, config) {
     trace({ event: 'attach', id: agent.id, depth })
   }
 
+
+  /**
+   * The preset a session composes under: the live projection (a blank session
+   * may be switched by enforce-model-preset AFTER agent/created; recompose keeps
+   * the same Agent, so our scoped registrations would otherwise survive the
+   * switch), falling back to the creation-time header.
+   */
+  function presetOf(agent) {
+    try { const live = ctx.sessionProjections?.stateOf(agent.session, 'agentPreset'); if (typeof live === 'string' && live !== '') return live } catch {}
+    return agent.session.header?.agentPreset ?? ''
+  }
+  function detach(agent, reason) {
+    const dispose = attached.get(agent)
+    if (dispose === undefined) return
+    attached.delete(agent)
+    void dispose()
+    trace({ event: 'detach', id: agent.id, reason })
+  }
+  // Chat-only presets (tiny local models) must not see these tools; restrict()
+  // exempts scoped registrations, so the gate has to live here.
+  ctx.on('agent-preset/selected', (sessionId, agentPreset) => {
+    const agent = ctx.agents.get(sessionId)
+    if (agent === undefined) return
+    if (config.skipPresets.includes(agentPreset)) detach(agent, `preset ${agentPreset}`)
+    else attach(agent)
+  })
   for (const agent of ctx.agents.list()) attach(agent)
   ctx.on('agent/created', ({ agent }) => { attach(agent) })
 
