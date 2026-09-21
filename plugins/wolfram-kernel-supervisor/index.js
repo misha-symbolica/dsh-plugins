@@ -364,6 +364,7 @@ export function apply(ctx, config) {
   ctx.connection.fetch.register({
     path: SHOWN_IMAGE_PATH,
     methods: ['GET', 'HEAD'],
+    requestBody: 'buffered', // GET with a query string throws on a streaming Request (rebase 2026-09-18); see KERNEL_PATH
     fetch: async (request) => {
       const url = new URL(request.url)
       const sessionId = url.searchParams.get('sessionId') ?? ''
@@ -421,6 +422,7 @@ export function apply(ctx, config) {
   ctx.connection.fetch.register({
     path: MANIPULATE_PATH,
     methods: ['GET', 'HEAD'],
+    requestBody: 'buffered', // GET with a query string throws on a streaming Request (rebase 2026-09-18); see KERNEL_PATH
     fetch: async (request) => {
       const url = new URL(request.url)
       const sessionId = url.searchParams.get('sessionId') ?? ''
@@ -522,6 +524,7 @@ export function apply(ctx, config) {
   ctx.connection.fetch.register({
     path: OPEN_PATH,
     methods: ['GET', 'HEAD'],
+    requestBody: 'buffered', // GET with a query string throws on a streaming Request (rebase 2026-09-18); see KERNEL_PATH
     fetch: async (request) => {
       const raw = new URL(request.url).searchParams.get('path') ?? ''
       const path = resolvePath(raw)
