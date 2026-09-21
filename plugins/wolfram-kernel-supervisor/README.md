@@ -24,6 +24,12 @@ Kernel ids are `wl:<session>:<kernel>` (`s:M:N`-style, like browser-automation).
 `kernelId` omitted/null = the chat's **last-started** live kernel, or a fresh one
 (`Opened kernel wl:0:0 …` prefixes that result). Ids are validated against the
 caller's session; subagents get their own session (`subagents: true`).
+Sessions on the agent presets listed in `skipPresets` (default `['minimal',
+'minimal-no-tools']`) never get the `wolfram_*` tools: the registrations are
+per agent (scoped) and therefore exempt from `ctx.tools.restrict()`, so the
+plugin gates itself, re-evaluating on `agent-preset/selected` (a blank session
+may be switched by `enforce-model-preset` after creation; `recompose` keeps
+the same Agent).
 
 ## Slash commands (no model involved)
 
