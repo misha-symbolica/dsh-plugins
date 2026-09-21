@@ -51,9 +51,10 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
 import type { PropsRuntime, InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
-// Type-only: `ctx.settingsScope` (settings domain base) and the `settings.plugin.item` slot.
+// Type-only: `ctx.settingsScope` (settings domain base) and the Plugins page's
+// `plugins.bundle.config` slot (ui-plugin-manager slot-contract).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { WolframKernelCard, type KernelSettings } from './kernel-card.tsx'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { DisclosureRow, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -970,6 +971,8 @@ export const name = 'wolfram-kernel-supervisor-client'
 export const inject = ['slots', 'uiConversation']
 /** Host settings namespace (index.js SETTINGS_NS). */
 const SETTINGS_NS = 'wolfram-kernel-supervisor'
+/** This package's name (package.json), the key the Plugins page uses for a bundle's configuration. */
+const BUNDLE_NAME = 'tali-wolfram-kernel-supervisor'
 
 export function apply(ctx: Context): void {
   // Turn-scoped accumulator feeding the pinned gallery (registration unwinds with the plugin).
@@ -996,13 +999,20 @@ export function apply(ctx: Context): void {
     ctx.slots.register({ name: 'tool.call.toolview', key: 'wolfram_run' }, WolframEvalRow),
   ])
 
-  // Settings ▸ Plugins ▸ Plugin configuration ▸ "Wolfram kernel": the card is
-  // keyed by the Host settings namespace (index.js SETTINGS_NS) and shows up
-  // exactly when the Host serves it. On a sub-fiber so a shell without the
-  // settings domain still gets the chat-side plugin.
+  // Plugins panel ▸ this bundle's page ▸ configuration section: the card is the
+  // bundle's own configuration, keyed by the bundle's package name
+  // (`plugins.bundle.config`, ui-plugin-manager slot-contract). Until the
+  // fork's 2026-09-18 rebase onto upstream 0.1.6-alpha.2 it lived in
+  // Settings ▸ Plugins as a `settings.plugin.item` keyed by the Host settings
+  // namespace; that slot is gone (the section now only carries
+  // `settings.plugins.tab` chrome) and `plugins.item` is reserved for the
+  // host-plane pages the shell ships. The page asks for `view: 'page'` only.
+  // On a sub-fiber so a shell without the settings domain still gets the
+  // chat-side plugin.
   ctx.inject(['settingsScope'], (ctx) => {
     const scope = ctx.settingsScope.bind<KernelSettings>({ namespace: SETTINGS_NS })
     const Card = () => <WolframKernelCard scope={scope} />
-    ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({ name: 'settings.plugin.item', key: SETTINGS_NS }, Card))
+    ctx.slots.inject('plugins.bundle.config', () =>
+      ctx.slots.register({ name: 'plugins.bundle.config', key: BUNDLE_NAME }, Card))
   })
 }

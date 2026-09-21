@@ -1,9 +1,12 @@
 /**
- * "Wolfram kernel" card in Settings ▸ Plugins ▸ Plugin configuration.
+ * "Wolfram kernel" card on this bundle's page in the Plugins panel (sidebar
+ * ▸ Plugins ▸ tali-wolfram-kernel-supervisor ▸ configuration section).
  *
- * Registered under the `settings.plugin.item` slot keyed by the Host settings
- * namespace `wolfram-kernel-supervisor` (index.js SETTINGS_NS): the tab pairs
- * the two and the card appears exactly when the Host serves that namespace.
+ * Registered under `plugins.bundle.config` keyed by the bundle's package name
+ * (index.tsx BUNDLE_NAME); the Plugins page renders it with `view: 'page'`.
+ * The Host settings namespace it edits is `wolfram-kernel-supervisor`
+ * (index.js SETTINGS_NS). (Before the 2026-09-18 rebase: Settings ▸ Plugins,
+ * `settings.plugin.item` keyed by that namespace — a slot that no longer exists.)
  *
  * The one field, `kernelPath`, is edited through `ctx.settingsScope` with the
  * same staged draft → Save discipline as the in-tree cards (what is on screen
@@ -17,8 +20,6 @@
  * across plugins, so the equivalent inline styles live here.
  */
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
-// Type-only: the `settings.plugin.item` SlotMap entry (declared by the tab that renders it).
-import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { Button, IconChevronDownOutline14, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CSSProperties, ReactNode } from 'react'
 import { useCallback, useEffect, useState } from 'react'

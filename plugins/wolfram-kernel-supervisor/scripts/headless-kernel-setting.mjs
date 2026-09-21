@@ -82,7 +82,7 @@ const assert = (cond, msg) => { if (!cond) { console.error('FAIL:', msg); consol
     assert(body.source === 'detected', 'source = detected')
     assert(settings.userLayer(SETTINGS_NS)?.kernelPath === found.kernelPath, 'detected path persisted into the setting')
   } else {
-    assert(body.kernel === undefined && typeof body.message === 'string' && /Settings ▸ Plugins/.test(body.message), 'nothing found → configure-me message')
+    assert(body.kernel === undefined && typeof body.message === 'string' && /Plugins panel ▸ tali-wolfram-kernel-supervisor/.test(body.message), 'nothing found → configure-me message')
     assert(settings.userLayer(SETTINGS_NS)?.kernelPath === undefined, 'setting left empty')
   }
   assert(body.settingsAvailable === true, 'settingsAvailable')
@@ -99,7 +99,7 @@ const assert = (cond, msg) => { if (!cond) { console.error('FAIL:', msg); consol
   settings.userLayer(SETTINGS_NS).kernelPath = '/nowhere/Mathematica.app'
   const bad = await call('POST', KERNEL_PATH, 'refresh')
   assert(bad.body.kernel === undefined && /not a Wolfram kernel/.test(bad.body.error ?? ''), 'bad setting → error names the path')
-  assert(/Settings ▸ Plugins ▸ Plugin configuration/.test(bad.body.message ?? ''), 'message tells the user where the setting is')
+  assert(/Plugins panel ▸ tali-wolfram-kernel-supervisor ▸ "Wolfram kernel"/.test(bad.body.message ?? ''), 'message tells the user where the setting is')
   // Correct it and check detect refills.
   const detected = await call('POST', KERNEL_PATH, 'detect')
   if (found) {

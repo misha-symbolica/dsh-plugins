@@ -372,7 +372,7 @@ export class KernelLocator {
    * the setting is, and (when nothing was found at all) the install remedy.
    */
   unconfiguredMessage() {
-    const fix = 'To fix: in the DSH web GUI open Settings ▸ Plugins ▸ Plugin configuration ▸ "Wolfram kernel" and enter the kernel location (the WolframKernel executable, or the Wolfram.app / Mathematica.app bundle or install directory), or set `kernel:` in the wolfram-kernel-supervisor plugin config.'
+    const fix = 'To fix: in the DSH web GUI open the Plugins panel ▸ tali-wolfram-kernel-supervisor ▸ "Wolfram kernel" and enter the kernel location (the WolframKernel executable, or the Wolfram.app / Mathematica.app bundle or install directory), or set `kernel:` in the wolfram-kernel-supervisor plugin config.'
     if (this.error !== undefined) return `Wolfram kernel not usable: ${this.error} ${fix}`
     const looked = this.searched.length > 0 ? ` Auto-detection looked at: ${this.searched.join('; ')}.` : ''
     const install = this.options.installRemedy ? ` If Wolfram is not installed at all: ${this.options.installRemedy}` : ''

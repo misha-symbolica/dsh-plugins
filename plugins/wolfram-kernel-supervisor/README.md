@@ -159,11 +159,12 @@ used unmodified. Package symbols must not be spelled like `System\`` built-ins
 - **Shutdown ladder** (`servers.mjs`): write `Quit`, end stdin → wait 2 s → `SIGKILL` → `SIGKILL` child kernels. The kernel **ignores SIGTERM/SIGINT**; MCP-SDK-style SIGTERM closes are how 23 orphans accumulated on this machine before this plugin existed.
 - Idle timer per session (`idleMinutes`, default 60) closes kernels and injects a notice; `agent/disposed` and plugin unload close everything. Caps: `maxKernelsPerSession` 4, `maxKernelsGlobal` 12.
 
-## Where the kernel is (Settings ▸ Plugins ▸ "Wolfram kernel")
+## Where the kernel is (Plugins ▸ this bundle ▸ "Wolfram kernel")
 
 The kernel location is a live **setting** (namespace `wolfram-kernel-supervisor`, field
-`kernelPath`), edited in the web GUI under Settings ▸ Plugins ▸ Plugin configuration ▸
-**Wolfram kernel**. Precedence: that setting → the plugin config `kernel:` → auto-detection.
+`kernelPath`), edited in the web GUI on this bundle's page in the Plugins panel (sidebar ▸
+**Plugins** ▸ the `tali-wolfram-kernel-supervisor` card ▸ **Wolfram kernel**; the card is the
+bundle's `plugins.bundle.config` entry — before DSH 0.1.6-alpha.2 it sat under Settings ▸ Plugins). Precedence: that setting → the plugin config `kernel:` → auto-detection.
 When the setting is empty the plugin searches `$WOLFRAMSCRIPT_KERNELPATH`, wolframscript's own
 configuration, the platform's standard install locations (macOS `/Applications` and
 `~/Applications` `Wolfram*.app` / `Mathematica*.app`; Linux `/usr/local/Wolfram`, `/opt/Wolfram`

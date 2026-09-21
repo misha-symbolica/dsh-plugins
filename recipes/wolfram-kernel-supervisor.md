@@ -260,9 +260,21 @@ What exists now (`plugins/wolfram-kernel-supervisor/kernel-locator.mjs`, `index.
   testing:** the first probe used `ToString[$VersionNumber]`, which prints `15.` (trailing dot);
   the regex rejected it, the probe "failed" and the test run configured wolframscript on this Mac
   (harmless — same kernel it already used — the conf now has an explicit line). `$Version` fixed it.
-- **Card** (`src/client/kernel-card.tsx`): registered under the in-tree `settings.plugin.item` keyed
-  slot with `key: SETTINGS_NS` from a `ctx.inject(['settingsScope'], …)` sub-fiber; the Plugins tab
-  pairs served namespaces with cards by key, so it appears exactly when the Host serves the namespace.
+- **Card** (`src/client/kernel-card.tsx`): since 2026-09-21 registered under the Plugins page's
+  `plugins.bundle.config` keyed slot with `key: 'tali-wolfram-kernel-supervisor'` (the bundle's
+  package name; ui-plugin-manager `slot-contract.ts`) from a `ctx.inject(['settingsScope'], …)`
+  sub-fiber — it renders in the configuration section of the bundle's own page (sidebar ▸ Plugins ▸
+  the bundle card), `view: 'page'` only. Until the fork's 2026-09-18 rebase it was a
+  `settings.plugin.item` keyed by `SETTINGS_NS` under Settings ▸ Plugins; that slot is gone (the
+  section now carries only `settings.plugins.tab` chrome) and `plugins.item` is reserved for the
+  host-plane pages the shell ships, so the card silently never appeared (`slots.inject` waits for a
+  slot nobody declares). Found by `pnpm typecheck`; a second post-rebase break surfaced once it
+  rendered: `GET /api/wolfram/kernel` answered 400 until the route declared `requestBody: 'buffered'`
+  (the same node:http-bridge rule the rebase recipe records for foreign-link-opener). Both verified
+  on the preview from a `/tmp` copy installed as a bundle into the preview profile
+  (`DSH_HOME=~/.dsh-preview pnpm dsh plugin --profile web add /tmp/wks-preview`, then `remove`):
+  card on the bundle page, status 200, Wolfram 15.0.1 resolved. The client half went live with the
+  rebuild; the host half (`index.js`, `kernel-locator.mjs`) applies on the next live `dsh web` restart.
   Field writes go through `ctx.settingsScope.bind({ namespace })` → `scope.set/unset('kernelPath')`
   (revision-fenced mutate; empty draft = clear the override). Status comes from the plugin's own
   route `GET /api/wolfram/kernel` (document-relative `./api/wolfram/kernel`, same-origin cookie);

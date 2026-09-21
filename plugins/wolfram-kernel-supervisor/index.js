@@ -44,7 +44,7 @@
  *
  * KERNEL LOCATION (kernel-locator.mjs). The kernel is resolved live from three
  * layers: the user's value in the DSH settings namespace `wolfram-kernel-supervisor`
- * (field `kernelPath`, edited in Settings ▸ Plugins ▸ Plugin configuration ▸
+ * (field `kernelPath`, edited on this bundle's page in the Plugins panel ▸
  * "Wolfram kernel"; the browser half's card) → the plugin config `kernel` →
  * auto-detection over the platform's install locations, $WOLFRAMSCRIPT_KERNELPATH,
  * wolframscript's own configuration and $PATH. A successful detection is written
@@ -130,7 +130,7 @@ export const SHOWN_IMAGE_PATH = '/api/wolfram/shown'
 export const MANIPULATE_PATH = '/api/wolfram/manipulate'
 export const OPEN_PATH = '/api/wolfram/open'
 export const KERNEL_PATH = '/api/wolfram/kernel'
-/** Settings namespace (Settings ▸ Plugins card key; mirrored in src/client). */
+/** Settings namespace the card edits (mirrored in src/client). */
 export const SETTINGS_NS = 'wolfram-kernel-supervisor'
 export const SettingsSchema = Schema.object({
   kernelPath: Schema.string().default('').description('Wolfram kernel: the WolframKernel executable, the wolfram launcher, a Wolfram.app / Mathematica.app bundle, or an install directory. Empty = auto-detect (filled in when found).'),
@@ -195,6 +195,11 @@ export function apply(ctx, config) {
   ctx.connection.fetch.register({
     path: KERNEL_PATH,
     methods: ['GET', 'POST'],
+    // Required since the 2026-09-18 rebase (upstream 0.1.6-alpha.2): the
+    // node:http bridge treats a route without it as streaming, and a streaming
+    // GET Request throws → the webserver's last-resort 400 (the card then
+    // showed "Not found" with a JSON-parse error). Same fix as foreign-link-opener.
+    requestBody: 'buffered',
     fetch: async (request) => {
       const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
       try {
