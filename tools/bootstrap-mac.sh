@@ -419,6 +419,16 @@ if wants apps && [ "$APPS" = 1 ]; then
   fi
 fi
 
+# Wolfram: activation is per macOS user. A kernel that starts but has no licence for this account makes
+# every wolfram_* call fail with "No valid password found"; probe once so it lands in the to-do list.
+if [ -x "/Applications/Wolfram.app/Contents/MacOS/WolframKernel" ] && [ "$DRY" != 1 ]; then
+  WK_OUT="$(perl -e 'alarm 60; exec @ARGV' -- "/Applications/Wolfram.app/Contents/MacOS/WolframKernel" -noprompt -run 'Print[1+1]; Exit[]' 2>&1 | tr -d '\n' || true)"
+  case "$WK_OUT" in
+    *2*) ok "Wolfram kernel licensed for this user" ;;
+    *) todo "activate Wolfram for this macOS user: \"/Applications/Wolfram.app/Contents/MacOS/WolframKernel\" -activate <activation-key> -noprompt -run 'Exit[]'   (wolframscript -activate refuses a Mathematica kernel)" ;;
+  esac
+fi
+
 # Plugins that only make sense with a paid app already on the Mac: left out of
 # the build and the bundle install when the app is absent (re-run
 # `pnpm install-plugins` after installing the app to add them).
