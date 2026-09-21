@@ -289,7 +289,7 @@ function build(e, complex) {
 const view = document.getElementById('view');
 const width = scene.imageSize?.[0] || 480, height = scene.imageSize?.[1] || Math.round(width * 0.75);
 view.style.width = width + 'px'; view.style.height = height + 'px';
-const renderer = new THREE.WebGLRenderer({ antialias: true, <remote>: true, preserveDrawingBuffer: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
 renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(width, height);

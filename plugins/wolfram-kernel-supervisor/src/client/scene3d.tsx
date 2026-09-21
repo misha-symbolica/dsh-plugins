@@ -123,7 +123,7 @@ export class SceneRenderer {
   constructor(readonly container: HTMLDivElement, options: SceneRendererOptions) {
     THREE.ColorManagement.enabled = false
     this.width = options.width; this.height = options.height; this.ink = options.ink
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, <remote>: true, preserveDrawingBuffer: true })
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true })
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace
     this.renderer.setPixelRatio(window.devicePixelRatio || 1)
     this.renderer.setSize(options.width, options.height)
