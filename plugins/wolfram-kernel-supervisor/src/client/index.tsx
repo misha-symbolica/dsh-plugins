@@ -830,10 +830,8 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
       ? (
         <>
           {meta?.attachment !== undefined && meta.attachment !== null
-            ? <ShowBody sessionId={String(sessionId)} meta={meta} alt={label} />
+            ? <ShowBody sessionId={String(sessionId)} meta={meta} alt={label} caption={label} />
             : <WolframImage source={{ loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />}
-          {meta?.manipulate === undefined && <ShowCaption label={label} path={meta?.path ?? undefined} />}
-          {meta?.manipulate === undefined && <StatusRow timing={meta?.timing} live={false} onOpen={meta?.path ? () => openShown(meta.path as string) : undefined} opening={false} sourcePath={meta?.sourcePath ?? undefined} />}
           {meta?.errorImage && <div style={{ fontSize: 12, opacity: 0.8 }}>⚠ the rendering contains an error box</div>}
           <details style={{ fontSize: 12, opacity: 0.7 }}>
             <summary>expression</summary>
@@ -856,13 +854,22 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
  * drawn with three.js at the PNG's point size, the PNG standing in until the
  * scene JSON has loaded (and permanently when WebGL is unavailable).
  */
-function ShowBody({ sessionId, meta, alt }: { sessionId: string, meta: ShowMeta, alt: string }) {
+function ShowBody({ sessionId, meta, alt, caption }: { sessionId: string, meta: ShowMeta, alt: string, caption: string }) {
   if (meta.attachment === null) return <div style={{ fontSize: 12, opacity: 0.7 }}>[image unavailable{meta.path ? `: ${meta.path}` : ''}]</div>
   if (meta.manipulate !== undefined && meta.kernelId !== undefined) {
     return <ManipulateWidget sessionId={sessionId} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(sessionId, meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={alt} path={meta.path ?? undefined} timing={meta.timing} sourcePath={meta.sourcePath ?? undefined} scene={meta.scene} />
   }
-  if (meta.scene !== undefined) return <WolframScene sessionId={sessionId} meta={meta as ShowMeta & { attachment: ImageRef, scene: SceneRef }} alt={alt} />
-  return <WolframImage source={{ url: shownImageUrl(sessionId, meta.attachment) }} image={meta.attachment} pointWidth={meta.points?.width} alt={alt} path={meta.path ?? undefined} />
+  // Static shows (image or native scene) share the caption link and the status row (timings,
+  // open-PNG and open-.wl icons) in every card kind: tool row, /wolfram-show command card, gallery.
+  return (
+    <>
+      {meta.scene !== undefined
+        ? <WolframScene sessionId={sessionId} meta={meta as ShowMeta & { attachment: ImageRef, scene: SceneRef }} alt={alt} />
+        : <WolframImage source={{ url: shownImageUrl(sessionId, meta.attachment) }} image={meta.attachment} pointWidth={meta.points?.width} alt={alt} path={meta.path ?? undefined} />}
+      <ShowCaption label={caption} path={meta.path ?? undefined} />
+      <StatusRow timing={meta.timing} live={false} onOpen={meta.path ? () => openShown(meta.path as string) : undefined} opening={false} sourcePath={meta.sourcePath ?? undefined} />
+    </>
+  )
 }
 
 /** Fetch and parse a stored scene; `failed` falls back to the PNG. */
@@ -930,8 +937,7 @@ export function WolframShowCommandCard({ node, sessionId }: CommandProps) {
       {state === 'error' && <pre style={PRE_STYLE}>{outcome?.text ?? 'failed'}</pre>}
       {state === 'ok' && payload !== undefined && (
         <>
-          <ShowBody sessionId={String(sessionId)} meta={payload} alt={label} />
-          {payload.manipulate === undefined && <ShowCaption label={label} path={payload.path ?? undefined} />}
+          <ShowBody sessionId={String(sessionId)} meta={payload} alt={label} caption={label} />
         </>
       )}
       {state === 'ok' && payload === undefined && <pre style={PRE_STYLE}>{outcome?.text ?? ''}</pre>}
@@ -1096,8 +1102,7 @@ function ShownGallery({ turn, seq, matched: preselected, sessionId }: GalleryPro
     <div style={GALLERY_STYLE} data-wolfram-shown={matched.length}>
       {matched.map((item) => (
         <figure key={item.callId} style={{ margin: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
-          <ShowBody sessionId={sessionId} meta={item.meta} alt={item.meta.label ?? 'Wolfram graphics'} />
-          {item.meta.manipulate === undefined && <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} />}
+          <ShowBody sessionId={sessionId} meta={item.meta} alt={item.meta.label ?? 'Wolfram graphics'} caption={item.meta.label ?? ''} />
         </figure>
       ))}
     </div>
