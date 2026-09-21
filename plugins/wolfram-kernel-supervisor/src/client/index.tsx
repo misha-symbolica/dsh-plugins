@@ -299,6 +299,11 @@ function WolframImage({ source, image, pointWidth, alt, path }: { source: { url:
  */
 function Lightbox({ url, alt, path, onClose }: { url: string, alt: string, path: string | undefined, onClose: () => void }) {
   const [actual, setActual] = useState(false)
+  // Opaque page background: the PNGs are rendered transparent (they sit on the page colour), so a
+  // dimmed translucent mask showed the conversation through the plot itself.
+  const bg = getComputedStyle(document.body).backgroundColor
+  const background = bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent' ? bg : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#000' : '#fff')
+  const fg = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.7)'
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }
     window.addEventListener('keydown', onKey, true)
@@ -309,7 +314,7 @@ function Lightbox({ url, alt, path, onClose }: { url: string, alt: string, path:
       role="dialog"
       aria-label={alt}
       onClick={onClose}
-      style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,0.82)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', cursor: 'zoom-out' }}
+      style={{ position: 'fixed', inset: 0, zIndex: 10000, background, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', cursor: 'zoom-out' }}
     >
       <img
         src={url}
@@ -319,8 +324,8 @@ function Lightbox({ url, alt, path, onClose }: { url: string, alt: string, path:
           ? { display: 'block', maxWidth: 'none', cursor: 'zoom-out' }
           : { display: 'block', maxWidth: 'calc(100vw - 48px)', maxHeight: 'calc(100vh - 72px)', width: 'auto', height: 'auto', cursor: 'zoom-in' }}
       />
-      <div style={{ position: 'fixed', left: 16, bottom: 12, fontSize: 12, color: 'rgba(255,255,255,0.7)', fontFamily: 'var(--dsh-font-mono, ui-monospace, monospace)' }}>{path ?? alt}</div>
-      <button type="button" aria-label="Close" onClick={onClose} style={{ position: 'fixed', top: 12, right: 16, fontSize: 22, lineHeight: 1, color: 'rgba(255,255,255,0.85)', background: 'transparent', border: 0, cursor: 'pointer' }}>×</button>
+      <div style={{ position: 'fixed', left: 16, bottom: 12, fontSize: 12, color: fg, fontFamily: 'var(--dsh-font-mono, ui-monospace, monospace)' }}>{path ?? alt}</div>
+      <button type="button" aria-label="Close" onClick={onClose} style={{ position: 'fixed', top: 12, right: 16, fontSize: 22, lineHeight: 1, color: fg, background: 'transparent', border: 0, cursor: 'pointer' }}>×</button>
     </div>,
     document.body,
   )
