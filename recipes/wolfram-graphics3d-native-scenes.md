@@ -178,6 +178,8 @@ heuristics (viewer picks the outermost projected edges), `FaceGrids`, `ClipPlane
 | `node --check tools.mjs`: `Unexpected identifier 's'` after editing the tool description | an unescaped apostrophe inside the single-quoted description string | `\'` |
 | z tick labels cut off at the card's left edge | camera fit filled the viewport with the box; Mathematica reserves `ImagePadding` | fov × 1.3 when axes are drawn |
 | `pnpm add three` could have rebuilt `lib/client.js` (the `prepare` script) and hot-swapped the live GUI | it did not (mtime unchanged) — but check `ls -la lib/` after any install | build with `--outfile` while developing |
+| Live: dragging up/down spun the plot around z, left/right pitched it (first report, from the remote) | `OrbitControls` bakes `camera.up` into a private quaternion **in its constructor**; `SceneRenderer` built the controls before `setScene` set `up = ViewVertical` (z), so they orbited in a y-up frame. The standalone viewer set `up` first and never showed it | controls are created (re-created on a fresh camera) inside `setScene` after `up`; verified with synthetic pointer drags through the built bundle (`export { SceneRenderer }` for harness pages): horizontal drag keeps `position.z`, vertical changes it |
+| the remote showed a PNG for a 3D plot after the "rollout" | the remote is a separate Mac with its own clone; the commits were only local (`ahead 2`) | `git push`, then on the remote `git pull && pnpm install && pnpm run build` in the plugin + restart its `dsh web` |
 
 ## 7. References
 
