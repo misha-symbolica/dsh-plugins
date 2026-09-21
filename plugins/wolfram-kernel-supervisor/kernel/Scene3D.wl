@@ -1,7 +1,8 @@
 (* ::Package:: *)
-(* Scene3D` — EXPERIMENT (2026-09-21): translate Graphics3D into a web-friendly JSON scene by
-   walking the box IR that MakeBoxes produces (Graphics3DBox and the ~26 box heads under it),
-   instead of rasterizing. See README.md next to this file for the findings.
+(* Scene3D` — translate Graphics3D into the web-friendly JSON scene the DSH client renders with
+   three.js, by walking the box IR that MakeBoxes produces (Graphics3DBox and the ~26 box heads
+   under it) instead of rasterizing. Loaded by DSHPlugin.wl (same directory). Findings and the
+   standalone viewer prototype: recipes/wolfram-graphics3d-native-scenes.md, experiments/graphics3d/.
 
      Scene3D`ToScene[g]                   -> Association (the scene); g may be Graphics3D,
                                               Legended[...], a Graph, or a bare 3D primitive

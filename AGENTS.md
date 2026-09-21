@@ -473,8 +473,8 @@ can reproduce or maintain it:
   `fix/tailscale-mounting` (document-relative Host URLs; why a worktree), the
   measured Tailscale path-strip facts, and the trailing-slash trap. Ports and
   the Dock app / relay moved on in `dock-app-via-tailnet.md`.
-- `wolfram-graphics3d-native-scenes.md` — experiment (2026-09-21) toward a
-  native three.js `wolfram_show` for `Graphics3D`: the ~26-head box IR that
+- `wolfram-graphics3d-native-scenes.md` — native three.js `wolfram_show` for
+  `Graphics3D` (experiment + implementation, 2026-09-21): the ~26-head box IR that
   `ToBoxes` normalizes every 3D primitive/plot into (and the regions that pass
   through unboxed), why glTF export is too lossy to be the IR (triangles only,
   drops lines/points/text, rejects `Plot3D`), the `dsh-graphics3d/0` JSON
@@ -482,7 +482,11 @@ can reproduce or maintain it:
   `plugins/wolfram-kernel-supervisor/experiments/graphics3d/`, the measured
   three.js↔Mathematica lighting facts (π intensities, gamma space, Phong vs
   Blinn, `ImageScaled` z from the back for directional but from the front for
-  point lights), sizes vs PNG, and the proposed plugin wiring.
+  point lights), sizes vs PNG, and the plugin wiring as built (`kernel/Scene3D.wl`
+  + `"scene"` in the `DSH-SHOW` report via a temp file, `saveFile` attachment +
+  `/api/wolfram/scene`, `manipulate?format=scene` geometry swaps under a
+  persistent camera, `src/client/scene3d.tsx`; throwaway-home verification and
+  the hidden-command-card-before-first-turn trap).
 - `wolfram-kernel-supervisor.md` — per-chat Wolfram/Mathematica kernels
   (`wolfram-kernel-supervisor` plugin): the Pi `wolfram_Show`/rho archaeology,
   why the paclet fork's Show tool is obsolete, `wolfram_show`'s user-only image

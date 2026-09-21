@@ -110,6 +110,29 @@ body with the variables substituted, re-rasterized (~55 ms + transfer). Widgets
 live as long as the kernel: a 410 disables the controls with a note. The tool
 row and the pinned gallery each hold their own control state.
 
+## Native 3D (`Graphics3D` → three.js)
+
+A `Graphics3D` result (plots included; `Legended[…]` and 3D `Graph`s too) is not
+only rasterized: `kernel/Scene3D.wl` walks the `Graphics3DBox` IR that `ToBoxes`
+produces (≈26 box heads) into a JSON scene (`dsh-graphics3d/0`: plot range,
+`BoxRatios`, `ViewPoint`, lights, ticks, `sphere | cylinder | cone | cuboid | tube |
+polyhedron | mesh | line | point | arrow | text | group | complex` elements), the
+host stores it as a verbatim file attachment (`ctx.attachments.saveFile`,
+`application/vnd.dsh.graphics3d+json`) next to the PNG and references it from
+`presentationMeta.scene`. The client (`src/client/scene3d.tsx`, three.js inlined
+in the bundle) draws it at the PNG's point size — drag to rotate, wheel to zoom —
+with Mathematica's camera, `BoxRatios`, box, axes ticks, gamma-space lighting
+(light intensities × π, Phong→Blinn exponent ×4, `ImageScaled` light placement
+fixed to the camera) and CSS text labels; the PNG shows until the scene has
+loaded and stays when WebGL is unavailable or the translation was partial
+(`sceneUnsupported`: currently `Raster3DBox`, `Inset3DBox`, `Texture`, styled
+`Text`). `GET /api/wolfram/scene?sessionId&attachmentId` serves the JSON (same
+session-log authorization as `/shown`, gzip). **Manipulate of Graphics3D** fetches
+`/api/wolfram/manipulate?…&format=scene`: the kernel skips rasterization
+(`"Raster" -> False`, ~45 ms for the scene), the widget swaps geometry and keeps
+the user's camera. Findings, measurements and the standalone viewer:
+`recipes/wolfram-graphics3d-native-scenes.md`, `experiments/graphics3d/`.
+
 ## Transport cost (measured)
 
 Not the base64. In-kernel: `Rasterize` 13–17 ms, PNG encode 6 ms, base64 0.1 ms,
@@ -154,7 +177,8 @@ not on the sandbox kernel's context path.)
 ## Kernel-side code
 
 All Wolfram code the plugin evaluates on your behalf is in `kernel/DSHPlugin.wl`
-(`Get`'d once per kernel at bootstrap): `ShowRasterizer`, `Render`, `RunScript`.
+(`Get`'d once per kernel at bootstrap): `ShowRasterizer`, `Render`, `RunScript`,
+plus `kernel/Scene3D.wl` (`Scene3D\`ToScene`, loaded by it) for the native 3D scenes.
 No `.wl` files elsewhere, no paclet; the stock `Wolfram/AgentTools` server is
 used unmodified. Package symbols must not be spelled like `System\`` built-ins
 (`Show` resolved to the built-in and silently did nothing).
@@ -201,7 +225,8 @@ highest installed `Wolfram__AgentTools-*` paclet, 144 dpi, `theme: auto`, files 
 ```sh
 pnpm install                 # links DSH packages from ~/github/deepseek-harness
 pnpm run check               # syntax + Config smoke + headless kernel-setting test (fake ctx, fake settings provider)
-pnpm run typecheck && pnpm run build   # browser half → lib/client.js
+pnpm run typecheck && pnpm run build   # browser half → lib/client.js (minified; three.js inlined)
+node build.mjs --outfile=/tmp/x/lib/client.js   # build elsewhere: lib/client.js is what a LIVE profile serves (rebuilding it hot-swaps the running GUI)
 pnpm run live:kernels        # real kernels: isolation, default rules, 2x Rasterize, ZERO leaked processes
 ```
 

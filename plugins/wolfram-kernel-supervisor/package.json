@@ -18,6 +18,7 @@
     "environment.mjs",
     "kernel-locator.mjs",
     "kernel/DSHPlugin.wl",
+    "kernel/Scene3D.wl",
     "lib/client.js",
     "lib/client.js.map",
     "cordis.patch.yml"
@@ -41,7 +42,8 @@
   "dependencies": {
     "@deepseek-ai/dsh-tools": "link:../../deepseek-harness/packages/core/tools",
     "@deepseek-ai/schemastery": "link:../../deepseek-harness/vendor/schemastery",
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "three": "0.160.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:../../deepseek-harness/vendor/cordis",
@@ -55,6 +57,7 @@
     "@deepseek-ai/dsh-client-ui-slots": "link:../../deepseek-harness/packages/client/ui-slots",
     "@deepseek-ai/dsh-client-ui-tool": "link:../../deepseek-harness/packages/client/ui-tool",
     "@types/react": "~18.3.1",
+    "@types/three": "0.160.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.2"
   }

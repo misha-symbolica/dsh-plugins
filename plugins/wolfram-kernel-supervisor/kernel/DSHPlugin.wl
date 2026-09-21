@@ -21,9 +21,16 @@
    and the GUI can decide e.g. whether live slider previews are affordable.
 
    Options: "Resolution" (dpi, 144 = @2x), "Background" (None = transparent PNG | Automatic),
-   "TimeLimit" (seconds for the evaluation, default 30; the rasterization gets the same). *)
+   "TimeLimit" (seconds for the evaluation, default 30; the rasterization gets the same),
+   "Scene" (True: when the result is Graphics3D, also translate it with Scene3D`ToScene
+   (kernel/Scene3D.wl) into the JSON scene the GUI renders natively with three.js; the JSON is
+   written to a temp file and reported as "scene" -> <|path, bytes, elements|> in the DSH-SHOW
+   line, or "sceneUnsupported" -> {box heads} when the translation was partial),
+   "Raster" (False: skip the rasterization — used by scene-only Manipulate re-renders). *)
 
 BeginPackage["DSHPlugin`"];
+
+Get[FileNameJoin[{DirectoryName[$InputFileName], "Scene3D.wl"}]];
 
 (* NB: no System` names here — a package symbol spelled like a built-in (e.g. Show) resolves to the built-in. *)
 
@@ -33,7 +40,7 @@ RunScript::usage = "DSHPlugin`RunScript[path, args] runs a script file inside th
 
 Begin["`Private`"];
 
-Options[ShowRasterizer] = {"Resolution" -> 144, "Background" -> None, "TimeLimit" -> 30};
+Options[ShowRasterizer] = {"Resolution" -> 144, "Background" -> None, "TimeLimit" -> 30, "Scene" -> True, "Raster" -> True};
 Options[Render] = Options[ShowRasterizer];
 SetAttributes[ShowRasterizer, HoldAllComplete];
 
@@ -79,9 +86,28 @@ errorImageQ[_] := False;
 
 fail[reason_String, extra_Association : <||>] := Join[<|"ok" -> False, "error" -> reason|>, extra];
 
-(* HoldComplete[body] -> <| ok, image, evalMs, rasterMs, totalMs, messages, timedOut, errorImage |> or a failure. *)
+(* ---- native 3D scenes ----
+   A Graphics3D result (also Legended[Graphics3D, ...] and a 3D Graph) is translated with
+   Scene3D`ToScene; the JSON goes to a temp file the host reads and deletes. Never fails the
+   render: any problem simply yields no scene (and the PNG stands alone). *)
+sceneableQ[_Graphics3D] := True;
+sceneableQ[Legended[_Graphics3D, ___]] := True;
+sceneableQ[g_Graph] := Quiet @ TrueQ[MatchQ[Dimensions @ GraphEmbedding[g], {_, 3}]];
+sceneableQ[_] := False;
+
+sceneReport[res_, limit_] := Module[{t0 = AbsoluteTime[], scene, json, path},
+  scene = Quiet @ Check[TimeConstrained[Scene3D`ToScene[res], limit, $DSHTimedOut], $Failed];
+  If[! AssociationQ[scene] || KeyExistsQ[scene, "error"], Return @ <|"sceneUnsupported" -> {If[scene === $DSHTimedOut, "timeout", "translation failed"]}|>];
+  If[scene["unsupported"] =!= {}, Return @ <|"sceneUnsupported" -> scene["unsupported"]|>];
+  json = Developer`WriteRawJSONString[scene, "Compact" -> True];
+  If[! StringQ[json], Return @ <|"sceneUnsupported" -> {"json encoding failed"}|>];
+  path = FileNameJoin[{$TemporaryDirectory, "dsh-scene-" <> IntegerString[Hash[json, "SHA256"], 36] <> ".json"}];
+  If[Export[path, json, "Text"] =!= path, Return @ <|"sceneUnsupported" -> {"temp file write failed"}|>];
+  <|"scene" -> <|"path" -> path, "bytes" -> FileByteCount[path], "elements" -> Length[scene["elements"]], "sceneMs" -> Round[1000 (AbsoluteTime[] - t0)]|>|>];
+
+(* HoldComplete[body] -> <| ok, image, evalMs, rasterMs, totalMs, messages, timedOut, errorImage [, scene | sceneUnsupported] |> or a failure. *)
 evalAndRasterize[held_HoldComplete, opts_List] := Module[
-  {limit = Lookup[opts, "TimeLimit", 30], msgs = {}, evalT, res, rasterT, img, t0 = AbsoluteTime[]},
+  {limit = Lookup[opts, "TimeLimit", 30], msgs = {}, evalT, res, rasterT = 0, img = None, t0 = AbsoluteTime[], extra = <||>},
   {evalT, res} = AbsoluteTiming @ withMessageCapture[msgs,
     Check[TimeConstrained[ReleaseHold[held], limit, $DSHTimedOut], $DSHMessageFailed]];
   Which[
@@ -89,21 +115,25 @@ evalAndRasterize[held_HoldComplete, opts_List] := Module[
       Return @ fail["evaluation exceeded the time limit of " <> ToString[limit] <> " s", <|"timedOut" -> True, "evalMs" -> Round[1000 evalT], "messages" -> msgs|>],
     msgs =!= {} || res === $DSHMessageFailed,
       Return @ fail["evaluation issued messages; nothing was rasterized", <|"evalMs" -> Round[1000 evalT], "messages" -> msgs|>]];
-  {rasterT, img} = AbsoluteTiming @ withMessageCapture[msgs,
-    Check[TimeConstrained[rasterize[res, opts], limit, $DSHTimedOut], $DSHMessageFailed]];
-  Which[
-    img === $DSHTimedOut,
-      Return @ fail["rasterization exceeded the time limit of " <> ToString[limit] <> " s", <|"timedOut" -> True, "evalMs" -> Round[1000 evalT], "rasterMs" -> Round[1000 rasterT], "messages" -> msgs|>],
-    ! ImageQ[img],
-      Return @ fail["rasterization failed (" <> ToString[Head[img]] <> ")", <|"evalMs" -> Round[1000 evalT], "rasterMs" -> Round[1000 rasterT], "messages" -> msgs|>]];
-  <|"ok" -> True, "image" -> img, "evalMs" -> Round[1000 evalT], "rasterMs" -> Round[1000 rasterT],
-    "totalMs" -> Round[1000 (AbsoluteTime[] - t0)], "messages" -> msgs, "timedOut" -> False, "errorImage" -> errorImageQ[img]|>
+  If[TrueQ @ Lookup[opts, "Scene", True] && sceneableQ[res], extra = sceneReport[res, limit]];
+  If[TrueQ @ Lookup[opts, "Raster", True],
+    {rasterT, img} = AbsoluteTiming @ withMessageCapture[msgs,
+      Check[TimeConstrained[rasterize[res, opts], limit, $DSHTimedOut], $DSHMessageFailed]];
+    Which[
+      img === $DSHTimedOut,
+        Return @ fail["rasterization exceeded the time limit of " <> ToString[limit] <> " s", <|"timedOut" -> True, "evalMs" -> Round[1000 evalT], "rasterMs" -> Round[1000 rasterT], "messages" -> msgs|>],
+      ! ImageQ[img],
+        Return @ fail["rasterization failed (" <> ToString[Head[img]] <> ")", <|"evalMs" -> Round[1000 evalT], "rasterMs" -> Round[1000 rasterT], "messages" -> msgs|>]],
+    (* scene-only render: no picture, but the scene is required *)
+    If[! KeyExistsQ[extra, "scene"], Return @ fail["no native scene for this result", Join[<|"evalMs" -> Round[1000 evalT], "messages" -> msgs|>, extra]]]];
+  Join[<|"ok" -> True, "image" -> img, "evalMs" -> Round[1000 evalT], "rasterMs" -> Round[1000 rasterT],
+    "totalMs" -> Round[1000 (AbsoluteTime[] - t0)], "messages" -> msgs, "timedOut" -> False, "errorImage" -> errorImageQ[img]|>, extra]
 ];
 
 (* Print the DSH-SHOW report line (everything but the image) and return the image or $Failed. *)
 emit[r_Association] := (
   Print["DSH-SHOW:" <> Developer`WriteRawJSONString[KeyDrop[r, "image"], "Compact" -> True]];
-  If[TrueQ[r["ok"]], r["image"], $Failed]);
+  If[TrueQ[r["ok"]], If[ImageQ[r["image"]], r["image"], Null], $Failed]);   (* Null: a scene-only render *)
 
 (* ---- plain expression ---- *)
 ShowRasterizer[id_String, expr_, opts : OptionsPattern[]] := emit @ evalAndRasterize[HoldComplete[expr], Flatten[{opts, Options[ShowRasterizer]}]];

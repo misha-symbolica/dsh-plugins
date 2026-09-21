@@ -21,6 +21,15 @@
  * &values=[…], which re-rasterizes the held body in the same kernel with the
  * variables substituted. Widgets die with their kernel (410 → controls disable).
  *
+ * NATIVE 3D. A Graphics3D result is additionally translated in the kernel
+ * (kernel/Scene3D.wl walks the Graphics3DBox IR) into a JSON scene, stored as
+ * a verbatim file attachment and referenced from presentationMeta as
+ * `scene`; the GUI renders it with three.js (rotatable) and keeps the PNG as
+ * the fallback. GET /api/wolfram/scene?sessionId=…&attachmentId=… serves it
+ * (same session-log authorization as the image route, gzip when accepted);
+ * GET /api/wolfram/manipulate?…&format=scene re-renders a Manipulate as a
+ * scene only (no rasterization) so the widget swaps geometry and keeps its camera.
+ *
  * SLASH COMMANDS (no model involved): `/wolfram-show <expression>` renders exactly
  * like the wolfram_show tool and returns the presentation payload as JSON in the
  * command result, which the browser half renders through the keyed
@@ -82,6 +91,7 @@
 
 import { execFile, execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { gzipSync } from 'node:zlib'
 import { appendFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
@@ -91,7 +101,7 @@ import { KernelSessions, evaluate } from './kernels.mjs'
 import { findAgentToolsDirectory, kernelLaunch } from './servers.mjs'
 import { KernelLocator } from './kernel-locator.mjs'
 import { WOLFRAM_INSTALL_REMEDY } from './environment.mjs'
-import { createShowCore, createTools, parseShowReport, pngSize, showPresentation, stripReports } from './tools.mjs'
+import { createShowCore, createTools, parseShowReport, pngSize, showPresentation, stripReports, takeSceneFile } from './tools.mjs'
 
 export const name = 'wolfram-kernel-supervisor'
 
@@ -130,7 +140,10 @@ function pluginNotice(text) {
 }
 /** Exact Fetch routes (below /api). Mirrored in src/client. */
 export const SHOWN_IMAGE_PATH = '/api/wolfram/shown'
+export const SCENE_PATH = '/api/wolfram/scene'
 export const MANIPULATE_PATH = '/api/wolfram/manipulate'
+/** MIME type of the native 3D scene JSON (format "dsh-graphics3d/0", kernel/Scene3D.wl). */
+export const SCENE_MEDIA_TYPE = 'application/vnd.dsh.graphics3d+json'
 export const OPEN_PATH = '/api/wolfram/open'
 export const KERNEL_PATH = '/api/wolfram/kernel'
 /** Settings namespace the card edits (mirrored in src/client). */
@@ -319,8 +332,19 @@ export function apply(ctx, config) {
     }
   }
 
+  /** Verbatim file storage for the native 3D scene JSON (user-facing only, like storeImage). */
+  async function storeFile(bytes, name) {
+    const attachments = ctx.get('attachments')
+    if (attachments === undefined) return { reason: 'no attachment store is mounted' }
+    try {
+      return { ref: await attachments.saveFile({ data: bytes, name }) }
+    } catch (error) {
+      return { reason: `attachment store rejected the file: ${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
   const deps = {
-    sessions, admitImage, storeImage, labelOf: chatLabel, trace,
+    sessions, admitImage, storeImage, storeFile, labelOf: chatLabel, trace,
     config: { resolution: config.resolution, writeFiles: config.writeFiles, showDirectory: config.showDirectory },
     themeOf: (kernel) => kernel.theme ?? 'light',
   }
@@ -328,8 +352,11 @@ export function apply(ctx, config) {
 
   // ---------------------------------------------------------------- shown-image route
 
-  /** Whether the session's log holds a wolfram_show result whose meta references the attachment. */
-  async function sessionShows(sessionId, attachmentId) {
+  /**
+   * Whether the session's log holds a wolfram_show result whose meta references the attachment
+   * (`meta.attachment` = the PNG, `meta.scene.attachment` = the native 3D scene JSON).
+   */
+  async function sessionShows(sessionId, attachmentId, kind = 'image') {
     const live = ctx.get('sessions')?.get?.(sessionId)
     let events
     let observation
@@ -346,11 +373,12 @@ export function apply(ctx, config) {
       }
     }
     try {
+      const pick = (meta) => (kind === 'scene' ? meta?.scene?.attachment : meta?.attachment)
       for (const event of events) {
         let ref
-        if (event.type === 'tool/result') ref = event.data?.meta?.attachment
+        if (event.type === 'tool/result') ref = pick(event.data?.meta)
         else if (event.type === 'command/done' && typeof event.data?.text === 'string' && event.data.text.includes(attachmentId)) {
-          try { ref = JSON.parse(event.data.text)?.attachment } catch { /* not a wolfram command payload */ }
+          try { ref = pick(JSON.parse(event.data.text)) } catch { /* not a wolfram command payload */ }
         } else continue
         if (ref && typeof ref === 'object' && String(ref.attachmentId) === attachmentId) return ref
       }
@@ -382,6 +410,34 @@ export function apply(ctx, config) {
     },
   })
 
+
+  /** JSON response, gzip-encoded when the browser accepts it (scenes are 100 KB–1 MB of text, ~4:1). */
+  function jsonResponse(request, bytes, extraHeaders = {}) {
+    const gzip = /\bgzip\b/.test(request.headers.get('accept-encoding') ?? '')
+    const body = gzip ? gzipSync(bytes) : bytes
+    const headers = { 'content-type': SCENE_MEDIA_TYPE, 'content-length': String(body.byteLength), ...(gzip ? { 'content-encoding': 'gzip' } : {}), vary: 'accept-encoding', ...extraHeaders }
+    if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
+    return new Response(body, { status: 200, headers })
+  }
+
+  ctx.connection.fetch.register({
+    path: SCENE_PATH,
+    methods: ['GET', 'HEAD'],
+    requestBody: 'buffered', // GET with a query string throws on a streaming Request (rebase 2026-09-18); see KERNEL_PATH
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      const sessionId = url.searchParams.get('sessionId') ?? ''
+      const attachmentId = url.searchParams.get('attachmentId') ?? ''
+      if (sessionId === '' || attachmentId === '') return new Response('missing sessionId or attachmentId', { status: 400 })
+      const attachments = ctx.get('attachments')
+      if (attachments === undefined) return new Response('no attachment store', { status: 500 })
+      const ref = await sessionShows(sessionId, attachmentId, 'scene')
+      if (ref === undefined) return new Response('scene is not a wolfram_show result of this session', { status: 404 })
+      const chunks = []
+      try { for await (const chunk of attachments.readFileStream(ref)) chunks.push(chunk) } catch (error) { return new Response(`attachment read failed: ${error instanceof Error ? error.message : String(error)}`, { status: 404 }) }
+      return jsonResponse(request, Buffer.concat(chunks), { 'cache-control': 'private, max-age=31536000, immutable' })
+    },
+  })
 
   const showCore = createShowCore(deps)
 
@@ -436,10 +492,13 @@ export function apply(ctx, config) {
       if (entry === undefined) return new Response(`no interactive graphic "${id}" in kernel ${kernelId}; re-run wolfram_show`, { status: 410 })
       const list = wolframValues(entry.descriptor, values)
       if (list === undefined) return new Response('values do not match the controls', { status: 400 })
+      // &format=scene: native 3D only — skip the rasterization, answer with the scene JSON.
+      const sceneOnly = url.searchParams.get('format') === 'scene'
       let result
       const t0 = Date.now()
       try {
-        result = await evaluate(kernel, `DSHPlugin\`Render[${JSON.stringify(id)}, ${list}]`)
+        // Either the scene or the picture is wanted, never both: skip the other half of the work.
+        result = await evaluate(kernel, `DSHPlugin\`Render[${JSON.stringify(id)}, ${list}, ${sceneOnly ? '"Raster" -> False' : '"Scene" -> False'}]`)
       } catch (error) {
         return new Response(`render failed: ${error instanceof Error ? error.message : String(error)}`, { status: 500 })
       }
@@ -448,6 +507,16 @@ export function apply(ctx, config) {
       if (report !== undefined && !report.ok) {
         // 422: the body failed for these values (messages / timeout); the widget keeps its last frame and shows why.
         return new Response(JSON.stringify({ error: report.error, messages: report.messages, timedOut: report.timedOut }), { status: 422, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
+      }
+      const timingHeaders = {
+        'x-wolfram-eval-ms': String(report?.evalMs ?? ''), 'x-wolfram-raster-ms': String(report?.rasterMs ?? ''), 'x-wolfram-kernel-ms': String(report?.kernelMs ?? ''), 'x-wolfram-total-ms': String(totalMs),
+        'x-wolfram-scene-ms': String(report?.scene?.sceneMs ?? ''),
+      }
+      if (sceneOnly) {
+        const bytes = await takeSceneFile(report)
+        if (bytes === undefined) return new Response(`render produced no scene: ${(report?.sceneUnsupported ?? []).join(', ') || stripReports(result.text).slice(0, 300)}`, { status: 500 })
+        trace({ event: 'manipulate-render', kernelId, id, values, format: 'scene', evalMs: report?.evalMs ?? null, sceneMs: report?.scene?.sceneMs ?? null, totalMs })
+        return jsonResponse(request, bytes, { 'cache-control': 'no-store', ...timingHeaders })
       }
       const image = result.images.find(i => i.mediaType === 'image/png') ?? result.images[0]
       if (image === undefined) return new Response(`render produced no image: ${stripReports(result.text).slice(0, 500)}`, { status: 500 })
@@ -461,7 +530,7 @@ export function apply(ctx, config) {
         'content-type': image.mediaType, 'content-length': String(image.data.byteLength), 'cache-control': 'no-store',
         ...(savedPath !== undefined ? { 'x-wolfram-path': encodeURIComponent(savedPath) } : {}),
         'x-wolfram-scale': String(entry.scale), ...(size ? { 'x-wolfram-width': String(size.width), 'x-wolfram-height': String(size.height) } : {}),
-        'x-wolfram-eval-ms': String(report?.evalMs ?? ''), 'x-wolfram-raster-ms': String(report?.rasterMs ?? ''), 'x-wolfram-kernel-ms': String(report?.kernelMs ?? ''), 'x-wolfram-total-ms': String(totalMs),
+        ...timingHeaders,
         'x-wolfram-error-image': report?.errorImage ? '1' : '0',
       }
       trace({ event: 'manipulate-render', kernelId, id, values, evalMs: report?.evalMs ?? null, rasterMs: report?.rasterMs ?? null, totalMs })

@@ -6,11 +6,13 @@ box-level graphics IR rather than its high-level primitives? And is there a port
 carry such scenes as attachments?
 
 Answer in one line: **yes — the box IR is a closed set of ~26 heads, a 350-line WL translator plus a
-~400-line three.js viewer already reproduce Plot3D / shapes / polyhedra / Graph3D / VectorPlot3D
-visually; glTF is *not* usable as the rendering IR (Mathematica's exporter is too lossy) but is a
-fine optional download.** Code: `~/github/tali-dash-plugins/plugins/wolfram-kernel-supervisor/experiments/graphics3d/`
-(`Scene3D.wl` translator, `viewer.html`, 13 test scenes with `Rasterize` references). Nothing is wired
-into the plugin yet.
+~400-line three.js viewer reproduce Plot3D / shapes / polyhedra / Graph3D / VectorPlot3D visually;
+glTF is *not* usable as the rendering IR (Mathematica's exporter is too lossy) but is a fine optional
+download.** Same evening it was wired into the plugin (§5): `wolfram_show` of a `Graphics3D` now
+ships a scene beside the PNG and the GUI renders it natively; Manipulate of Graphics3D swaps geometry
+under the user's camera. Code: `plugins/wolfram-kernel-supervisor/kernel/Scene3D.wl` (translator),
+`src/client/scene3d.tsx` (renderer), `experiments/graphics3d/` (standalone `viewer.html`, 13 test
+scenes with `Rasterize` references).
 
 ## 1. The box IR is small and stable (measured, Mathematica 15.0.1)
 
@@ -101,29 +103,52 @@ Side-by-side results (viewer screenshot vs `Rasterize`): `shapes`, `plot3d`, `pl
 `Arrowheads[..., Appearance -> "Projected"]` flat heads render as cones; text is CSS2D
 (`Text3DBox` → plain string for now).
 
-## 5. Proposed first cut for the plugin
+## 5. What was built into the plugin (2026-09-21, verified in a throwaway DSH on :3090)
 
-1. **Kernel** (`kernel/DSHPlugin.wl`): `ShowRasterizer` gains a `"Mode" -> "Auto"` — if the
-   evaluated result's `ToBoxes` head is `Graphics3DBox` (or `Legended`/`Graph` wrapping one) run
-   `Scene3D\`ToScene`; when `unsupported` is empty print `DSH-SCENE3D:{json}` (or write the JSON to a
-   temp file and print its path — 450 KB through the MCP text channel costs ~10 ms, files don't help,
-   see the transport benchmark in `wolfram-kernel-supervisor.md`) **and still rasterize** a preview
-   PNG (the model-visible one-liner and the fallback for clients without WebGL). When `unsupported`
-   is non-empty fall back to the PNG and list the heads in the report so we learn what to add
-   (`Raster3DBox`, `Inset3DBox`, `Texture`, `Text3DBox` with non-string content are the known ones).
-2. **Host** (`tools.mjs`): parse the line, `ctx.attachments.saveFile` the JSON
-   (`application/vnd.dsh.graphics3d+json`), put the `FileAttachmentRef` next to the PNG in
-   `presentationMeta`, serve it through a sibling of `GET /api/wolfram/shown` (same session-scan
-   authorization) with gzip. Manipulate: `Render[id, values]` returns a new scene; the client swaps
-   geometry only (camera and controls persist — the actual win over re-rasterizing).
-3. **Client** (`src/client/index.tsx`): bundle three (~600 KB min; esbuild inlines it — check the
-   plugin bundle rule about externals in AGENTS.md; lazy-import the viewer module so text-only sessions
-   never pay) and port `viewer.html` into a `Scene3DView` component used by the toolview, the pinned
-   turn-tail gallery and the `/wolfram-show` command card; `OrbitControls` for rotation, the PNG shown
-   until the scene is fetched. Dark mode: `LightDark` already drives the kernel; the scene's box/tick
-   colours come from CSS variables instead.
-4. **Optional**: an "Export glTF/USDZ" action that calls `Export` in the kernel on the held
-   expression (lossy, but portable to QuickLook/Blender).
+1. **Kernel** (`kernel/DSHPlugin.wl` loads `kernel/Scene3D.wl`): `evalAndRasterize` gained
+   `"Scene" -> True` / `"Raster" -> True` options. After a clean evaluation, `sceneableQ` (Graphics3D,
+   `Legended[Graphics3D,…]`, a Graph with a 3D embedding) triggers `Scene3D\`ToScene` under
+   `Quiet`/`TimeConstrained`; a complete scene is written to `$TemporaryDirectory/dsh-scene-<sha>.json`
+   and reported as `"scene" -> <|path, bytes, elements, sceneMs|>` inside the existing `DSH-SHOW`
+   line (a partial one as `"sceneUnsupported" -> {heads}`); the PNG is still rasterized. Measured:
+   `Plot3D` scene 228 KB in 59 ms beside a 32 ms raster; `Raster3D` → `sceneUnsupported`;
+   `Render[id, values, "Raster" -> False]` (scene-only Manipulate frame) 45–57 ms. Why a temp file
+   and not a Print line: the report stays one small JSON, `stripReports` stays cheap, and 450 KB of
+   scene never enters the model-visible text path. Nothing in the render can fail because of the
+   scene (`Check` → no scene).
+2. **Host** (`tools.mjs`, `index.js`): `parseShowReport` reads `scene`/`sceneUnsupported`;
+   `takeSceneFile` reads + unlinks the temp file (path must match `/dsh-scene-[a-z0-9]+\.json$` — it
+   comes from kernel output); `storeFile` = `ctx.attachments.saveFile({data, name})` (verbatim,
+   content-addressed `FileAttachmentRef {attachmentId, name, bytes}`), stored as `<stem>.scene.json`;
+   `presentationMeta.scene = {attachment, bytes, elements, sceneMs}`; the model's one-liner gains
+   "The user sees it as a native, rotatable 3D scene (N elements, K KB)" or the unsupported list.
+   Route `GET /api/wolfram/scene?sessionId&attachmentId` (`SCENE_PATH`, `requestBody: 'buffered'`)
+   authorizes like `/shown` but against `meta.scene.attachment` (`sessionShows(…, 'scene')`), reads
+   `attachments.readFileStream`, answers `application/vnd.dsh.graphics3d+json`, gzip when accepted
+   (4:1). `/api/wolfram/manipulate?…&format=scene` evaluates `Render[…, "Raster" -> False]` and
+   returns the JSON (500 with the unsupported heads when the body stopped being Graphics3D); the
+   PNG path passes `"Scene" -> False` so neither format pays for the other.
+3. **Client** (`src/client/scene3d.tsx`, 600 lines; `index.tsx`): three r160 + `OrbitControls` +
+   `CSS2DRenderer` inlined (bundle 68 KB → 552 KB minified, 144 KB gzipped; `minify: true` added to
+   `build.mjs`). `SceneRenderer` owns renderer/camera/controls per card and `setScene(scene,
+   keepCamera)` rebuilds only the graph; `Scene3DView` is the React wrapper (`onError` → PNG
+   fallback, e.g. no WebGL). `ShowBody` is now the single visual for tool row, pinned gallery and
+   command card: `meta.scene` → `WolframScene` (fetches the route, PNG until loaded), Manipulate +
+   scene → `ManipulateWidget` in scene mode (`&format=scene`, `setLiveScene`, drops to PNG frames on
+   a 500 and re-renders once). Box/tick ink = the element's computed `color`, so dark mode is free.
+   Camera fit leaves 30 % for tick labels when axes are drawn (they were clipped at the card edge).
+4. **Verified** (throwaway home `/tmp/wks-g3d-home`, plugin copied to `/tmp/wks-next` with
+   `--outfile`, a seeded workspace, one real model turn so command cards show — **slash commands run
+   on a turn-less session but their cards stay hidden until the first turn**): `/wolfram-show Plot3D`
+   → native surface with ticks in the card; `/wolfram-show Manipulate[Graphics3D[…], {r,…}, {shape,…}]`
+   → slider release = `format=scene` render, 93 ms round trip, live-drag mode on (raster 0); a synthetic
+   drag rotated the view and the next slider change kept the rotation; page reload re-served the
+   scene from the file attachment.
+5. **Not done / optional**: an "Export glTF/USDZ" action (`Export` in the kernel on the held
+   expression; lossy but QuickLook/Blender-portable); lazy-loading three so text-only sessions never
+   download it (the CJS `__ModuleLoader__` bundle has no code splitting — would need a second served
+   asset); rollout to the live profile (needs a `dsh web` restart for the host half and a
+   `lib/client.js` rebuild that hot-swaps every open GUI).
 
 Open items: specular and point-light calibration (measure `ImageValue` of `Rasterize` probes as in
 §4 and fit), fat lines (`Line2` — `LineBasicMaterial` is 1 px), `Dashing`, `Texture` (ship the
@@ -149,6 +174,10 @@ heuristics (viewer picks the outermost projected edges), `FaceGrids`, `ClipPlane
 | Rainbow `Plot3D` washed out to white | Blinn-Phong with exponent 3 + π lights; Mathematica's classic Phong highlight is weak | `shininess = 4n`, damped specular |
 | Graph3D scene rendered black | both of its lights sit at `z = 0`, which for directional lights is the back — but the front end lights it | point-light z counts from the front (measured) |
 | `python3 -m http.server` never accepted connections (`lsof` shows the socket `CLOSED`) | unknown local quirk; node's `http` works | node one-liner server (README) |
+| `/wolfram-show` in a fresh throwaway session: trace shows the render, GUI shows nothing | command cards are hidden on a turn-less session (`conversationPhase` blank) | send any prompt first (credentials copied into the home), then the cards appear — including the earlier one |
+| `node --check tools.mjs`: `Unexpected identifier 's'` after editing the tool description | an unescaped apostrophe inside the single-quoted description string | `\'` |
+| z tick labels cut off at the card's left edge | camera fit filled the viewport with the box; Mathematica reserves `ImagePadding` | fov × 1.3 when axes are drawn |
+| `pnpm add three` could have rebuilt `lib/client.js` (the `prepare` script) and hot-swapped the live GUI | it did not (mtime unchanged) — but check `ls -la lib/` after any install | build with `--outfile` while developing |
 
 ## 7. References
 

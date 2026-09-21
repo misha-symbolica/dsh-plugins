@@ -56,6 +56,7 @@ import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { WolframKernelCard, type KernelSettings } from './kernel-card.tsx'
+import { Scene3DView, isScene3D, type Scene3D } from './scene3d.tsx'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { DisclosureRow, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CSSProperties, ReactNode } from 'react'
@@ -364,11 +365,19 @@ function timingLabel(t: ShowTiming | undefined): string {
  * under LIVE_THRESHOLD_MS, dragging previews continuously (debounced to
  * LIVE_INTERVAL_MS); a slow render switches live mode off again until a fast one.
  */
-function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, scale, alt, path, timing, sourcePath }: {
+function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, scale, alt, path, timing, sourcePath, scene }: {
   sessionId: string, kernelId: string, descriptor: ManipulateDescriptor, initialUrl: string, image: ImageRef, scale: number, alt: string, path: string | undefined, timing: ShowTiming | undefined, sourcePath: string | undefined,
+  /** Graphics3D body: re-renders fetch `&format=scene` and swap the geometry under a persistent camera. */
+  scene?: SceneRef | undefined,
 }) {
   const [values, setValues] = useState<ControlValue[]>(() => descriptor.controls.map(c => c.init))
   const [src, setSrc] = useState(initialUrl)
+  // Native 3D: the stored initial scene, replaced by every re-render's JSON; a failure drops back to PNG frames.
+  const [sceneMode, setSceneMode] = useState(scene !== undefined)
+  const initialScene = useScene(scene !== undefined && sceneMode ? sceneUrl(sessionId, scene) : undefined)
+  const [liveScene, setLiveScene] = useState<Scene3D | undefined>(undefined)
+  const shownScene = liveScene ?? initialScene.scene
+  useEffect(() => { if (initialScene.failed) setSceneMode(false) }, [initialScene.failed])
   const [busy, setBusy] = useState(false)
   const [dead, setDead] = useState<string | undefined>(undefined)
   const [problem, setProblem] = useState<string | undefined>(undefined)
@@ -389,7 +398,7 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
     inflight.current = true
     setBusy(true)
     try {
-      const url = manipulateUrl(sessionId, kernelId, descriptor.id, next)
+      const url = manipulateUrl(sessionId, kernelId, descriptor.id, next) + (sceneMode ? '&format=scene' : '')
       const response = await fetch(url, { credentials: 'same-origin' })
       if (response.status === 410) { setDead(await response.text()); return }
       if (response.status === 422) {
@@ -400,13 +409,22 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
         setLastTiming(undefined)
         return
       }
-      if (!response.ok) { setDead(`${response.status}: ${(await response.text()).slice(0, 200)}`); return }
+      if (!response.ok) {
+        // A scene-only render that produced no scene (e.g. the body stopped being Graphics3D): fall back to PNG frames.
+        if (sceneMode && response.status === 500) { setSceneMode(false); return }   // the effect below re-renders as PNG
+        setDead(`${response.status}: ${(await response.text()).slice(0, 200)}`); return
+      }
+      const n = (name: string) => { const v = Number(response.headers.get(name)); return Number.isFinite(v) && response.headers.get(name) !== '' ? v : null }
+      setLastTiming({ evalMs: n('x-wolfram-eval-ms'), rasterMs: n('x-wolfram-raster-ms'), kernelMs: n('x-wolfram-kernel-ms'), totalMs: n('x-wolfram-total-ms') })
+      if (sceneMode) {
+        const json = await response.json() as unknown
+        if (isScene3D(json)) { setLiveScene(json); setProblem(undefined) } else setProblem('the re-render returned no scene')
+        return
+      }
       const blob = await response.blob()
       const w = Number(response.headers.get('x-wolfram-width')), h = Number(response.headers.get('x-wolfram-height'))
       const s = Number(response.headers.get('x-wolfram-scale')) || scale
-      const n = (name: string) => { const v = Number(response.headers.get(name)); return Number.isFinite(v) && response.headers.get(name) !== '' ? v : null }
       if (w > 0 && h > 0) setSize({ w: w / s, h: h / s })
-      setLastTiming({ evalMs: n('x-wolfram-eval-ms'), rasterMs: n('x-wolfram-raster-ms'), kernelMs: n('x-wolfram-kernel-ms'), totalMs: n('x-wolfram-total-ms') })
       setProblem(response.headers.get('x-wolfram-error-image') === '1' ? 'the rendering contains an error box' : undefined)
       setSrc(prev => { if (prev.startsWith('blob:')) URL.revokeObjectURL(prev); return URL.createObjectURL(blob) })
     } catch (error) {
@@ -418,9 +436,17 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
       queued.current = undefined
       if (pending !== undefined) void render(pending)
     }
-  }, [sessionId, kernelId, descriptor.id, scale])
+  }, [sessionId, kernelId, descriptor.id, scale, sceneMode])
 
   useEffect(() => () => { if (liveTimer.current !== undefined) clearTimeout(liveTimer.current) }, [])
+  // Dropped out of scene mode after the user moved a control: fetch the PNG frame for the current values.
+  const fellBack = useRef(false)
+  useEffect(() => {
+    if (scene === undefined || sceneMode || fellBack.current) return
+    fellBack.current = true
+    void render(values)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sceneMode])
 
   /** Final value (release / change): render now. */
   const commit = (index: number, v: ControlValue) => {
@@ -512,8 +538,10 @@ function ManipulateWidget({ sessionId, kernelId, descriptor, initialUrl, image, 
           )
         })}
       </div>
-      <div style={{ ...IMAGE_FRAME, background: frame.color ?? 'transparent', opacity: busy && !live ? 0.75 : 1, transition: 'opacity 120ms' }}>
-        <img src={src} alt={alt} title={alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} onLoad={frame.onLoad} />
+      <div style={{ ...IMAGE_FRAME, background: sceneMode && shownScene !== undefined ? 'transparent' : frame.color ?? 'transparent', opacity: busy && !live ? 0.75 : 1, transition: 'opacity 120ms' }}>
+        {sceneMode && shownScene !== undefined
+          ? <Scene3DView scene={shownScene} width={size.w} height={size.h} onError={() => setSceneMode(false)} />
+          : <img src={src} alt={alt} title={alt} width={size.w} style={{ display: 'block', width: size.w, maxWidth: '100%', height: 'auto' }} onLoad={frame.onLoad} />}
       </div>
       <StatusRow timing={lastTiming} live={live} onOpen={dead === undefined ? () => { void openCurrent() } : undefined} opening={opening} sourcePath={sourcePath} />
       {problem !== undefined && <pre style={{ ...PRE_STYLE, fontSize: 11, opacity: 0.8 }}>{problem}</pre>}
@@ -666,8 +694,28 @@ function asManipulate(value: unknown): ManipulateDescriptor | undefined {
 
 interface ShowTiming { evalMs: number | null, rasterMs: number | null, kernelMs: number | null, totalMs: number | null }
 
+/** The native 3D scene (kernel/Scene3D.wl JSON) stored as a verbatim file attachment beside the PNG. */
+interface SceneRef {
+  attachment: { attachmentId: string, name: string, bytes: number }
+  bytes: number
+  elements: number
+}
+
+function asSceneRef(value: unknown): SceneRef | undefined {
+  if (!isRecord(value) || !isRecord(value.attachment)) return undefined
+  const a = value.attachment
+  if ((typeof a.attachmentId !== 'string' && typeof a.attachmentId !== 'number') || !positiveInt(a.bytes)) return undefined
+  return { attachment: { attachmentId: String(a.attachmentId), name: typeof a.name === 'string' ? a.name : 'scene.json', bytes: a.bytes }, bytes: positiveInt(value.bytes) ? value.bytes : a.bytes, elements: typeof value.elements === 'number' ? value.elements : 0 }
+}
+
+/** Same-origin URL of the plugin's scene route (host: index.js SCENE_PATH); document-relative like shownImageUrl. */
+function sceneUrl(sessionId: string, scene: SceneRef): string {
+  return `./api/wolfram/scene?sessionId=${encodeURIComponent(sessionId)}&attachmentId=${encodeURIComponent(scene.attachment.attachmentId)}`
+}
+
 interface ShowMeta {
   attachment: ImageRef | null
+  scene?: SceneRef
   manipulate?: ManipulateDescriptor
   timing?: ShowTiming
   errorImage?: boolean
@@ -695,6 +743,7 @@ function showMetaOf(block: Block): ShowMeta | undefined {
     label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
     kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
     manipulate: asManipulate(meta.manipulate),
+    scene: asSceneRef(meta.scene),
     timing: asTiming(meta.timing),
     errorImage: meta.errorImage === true,
   }
@@ -733,9 +782,9 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
     : ref !== undefined
       ? (
         <>
-          {meta?.manipulate !== undefined && meta.attachment !== null && meta.kernelId !== undefined
-            ? <ManipulateWidget sessionId={String(sessionId)} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(String(sessionId), meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={label} path={meta.path ?? undefined} timing={meta.timing} sourcePath={meta.sourcePath ?? undefined} />
-            : <WolframImage source={meta?.attachment !== undefined && meta.attachment !== null ? { url: shownImageUrl(String(sessionId), ref) } : { loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />}
+          {meta?.attachment !== undefined && meta.attachment !== null
+            ? <ShowBody sessionId={String(sessionId)} meta={meta} alt={label} />
+            : <WolframImage source={{ loadImage }} image={ref} pointWidth={meta?.points?.width} alt={label} path={meta?.path ?? undefined} />}
           {meta?.manipulate === undefined && <ShowCaption label={label} path={meta?.path ?? undefined} />}
           {meta?.manipulate === undefined && <StatusRow timing={meta?.timing} live={false} onOpen={meta?.path ? () => openShown(meta.path as string) : undefined} opening={false} sourcePath={meta?.sourcePath ?? undefined} />}
           {meta?.errorImage && <div style={{ fontSize: 12, opacity: 0.8 }}>⚠ the rendering contains an error box</div>}
@@ -754,12 +803,56 @@ export function WolframShowRow({ block, loadImage, sessionId }: Props) {
 }
 
 
-/** The image or interactive widget for one show payload (tool-row body, gallery item, command card). */
+/**
+ * The image, native 3D scene or interactive widget for one show payload (tool-row
+ * body, gallery item, command card). A Graphics3D result carries `scene`: it is
+ * drawn with three.js at the PNG's point size, the PNG standing in until the
+ * scene JSON has loaded (and permanently when WebGL is unavailable).
+ */
 function ShowBody({ sessionId, meta, alt }: { sessionId: string, meta: ShowMeta, alt: string }) {
   if (meta.attachment === null) return <div style={{ fontSize: 12, opacity: 0.7 }}>[image unavailable{meta.path ? `: ${meta.path}` : ''}]</div>
-  return meta.manipulate !== undefined && meta.kernelId !== undefined
-    ? <ManipulateWidget sessionId={sessionId} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(sessionId, meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={alt} path={meta.path ?? undefined} timing={meta.timing} sourcePath={meta.sourcePath ?? undefined} />
-    : <WolframImage source={{ url: shownImageUrl(sessionId, meta.attachment) }} image={meta.attachment} pointWidth={meta.points?.width} alt={alt} path={meta.path ?? undefined} />
+  if (meta.manipulate !== undefined && meta.kernelId !== undefined) {
+    return <ManipulateWidget sessionId={sessionId} kernelId={meta.kernelId} descriptor={meta.manipulate} initialUrl={shownImageUrl(sessionId, meta.attachment)} image={meta.attachment} scale={meta.scale ?? 2} alt={alt} path={meta.path ?? undefined} timing={meta.timing} sourcePath={meta.sourcePath ?? undefined} scene={meta.scene} />
+  }
+  if (meta.scene !== undefined) return <WolframScene sessionId={sessionId} meta={meta as ShowMeta & { attachment: ImageRef, scene: SceneRef }} alt={alt} />
+  return <WolframImage source={{ url: shownImageUrl(sessionId, meta.attachment) }} image={meta.attachment} pointWidth={meta.points?.width} alt={alt} path={meta.path ?? undefined} />
+}
+
+/** Fetch and parse a stored scene; `failed` falls back to the PNG. */
+function useScene(url: string | undefined): { scene: Scene3D | undefined, failed: boolean } {
+  const [scene, setScene] = useState<Scene3D | undefined>(undefined)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    if (url === undefined) return
+    let cancelled = false
+    setFailed(false)
+    fetch(url, { credentials: 'same-origin' })
+      .then(async (r) => { if (!r.ok) throw new Error(String(r.status)); return r.json() as Promise<unknown> })
+      .then((json) => { if (cancelled) return; if (isScene3D(json)) setScene(json); else setFailed(true) })
+      .catch(() => { if (!cancelled) setFailed(true) })
+    return () => { cancelled = true }
+  }, [url])
+  return { scene, failed }
+}
+
+/** Point size of the view: the PNG's point size (what Mathematica would have displayed). */
+function viewSize(meta: ShowMeta & { attachment: ImageRef }): { w: number, h: number } {
+  const scale = meta.scale ?? 2
+  return { w: meta.points?.width ?? Math.round(meta.attachment.width / scale), h: meta.points?.height ?? Math.round(meta.attachment.height / scale) }
+}
+
+function WolframScene({ sessionId, meta, alt }: { sessionId: string, meta: ShowMeta & { attachment: ImageRef, scene: SceneRef }, alt: string }) {
+  const { scene, failed } = useScene(sceneUrl(sessionId, meta.scene))
+  const [webglFailed, setWebglFailed] = useState(false)
+  if (scene === undefined || failed || webglFailed) {
+    return <WolframImage source={{ url: shownImageUrl(sessionId, meta.attachment) }} image={meta.attachment} pointWidth={meta.points?.width} alt={alt} path={meta.path ?? undefined} />
+  }
+  const size = viewSize(meta)
+  return (
+    <div style={{ ...IMAGE_FRAME, background: 'transparent' }} title={`${alt} — drag to rotate, scroll to zoom`}>
+      <Scene3DView scene={scene} width={size.w} height={size.h} onError={() => setWebglFailed(true)} />
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------- /wolfram-show command card
@@ -878,6 +971,7 @@ function shownFromMeta(meta: unknown): (ShowMeta & { attachment: ImageRef }) | u
     label: typeof meta.label === 'string' && meta.label !== '' ? meta.label : null,
     kernelId: typeof meta.kernelId === 'string' ? meta.kernelId : undefined,
     manipulate: asManipulate(meta.manipulate),
+    scene: asSceneRef(meta.scene),
     timing: asTiming(meta.timing),
     errorImage: meta.errorImage === true,
   }
@@ -955,9 +1049,7 @@ function ShownGallery({ turn, seq, matched: preselected, sessionId }: GalleryPro
     <div style={GALLERY_STYLE} data-wolfram-shown={matched.length}>
       {matched.map((item) => (
         <figure key={item.callId} style={{ margin: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
-          {item.meta.manipulate !== undefined && item.meta.kernelId !== undefined
-            ? <ManipulateWidget sessionId={sessionId} kernelId={item.meta.kernelId} descriptor={item.meta.manipulate} initialUrl={shownImageUrl(sessionId, item.meta.attachment)} image={item.meta.attachment} scale={item.meta.scale ?? 2} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} timing={item.meta.timing} sourcePath={item.meta.sourcePath ?? undefined} />
-            : <WolframImage source={{ url: shownImageUrl(sessionId, item.meta.attachment) }} image={item.meta.attachment} pointWidth={item.meta.points?.width} alt={item.meta.label ?? 'Wolfram graphics'} path={item.meta.path ?? undefined} />}
+          <ShowBody sessionId={sessionId} meta={item.meta} alt={item.meta.label ?? 'Wolfram graphics'} />
           {item.meta.manipulate === undefined && <ShowCaption label={item.meta.label ?? ''} path={item.meta.path ?? undefined} />}
         </figure>
       ))}

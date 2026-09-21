@@ -24,16 +24,21 @@ const PLATFORM_MODULES = [
   '@deepseek-ai/dsh-client-ui-primitives',
 ]
 
+// `--outfile=<path>` builds elsewhere (lib/client.js is what a LIVE profile serves: writing it
+// hot-swaps the running GUI, so develop against a side output and copy it over deliberately).
+const outfile = process.argv.find(a => a.startsWith('--outfile='))?.slice('--outfile='.length) ?? 'lib/client.js'
+
 /** @type {import('esbuild').BuildOptions} */
 const options = {
   entryPoints: ['src/client/index.tsx'],
-  outfile: 'lib/client.js',
+  outfile,
   bundle: true,
   format: 'cjs',
   platform: 'browser',
   target: 'es2022',
   jsx: 'automatic',
   sourcemap: true,
+  minify: true,   // three.js is inlined (~900 KB source → 550 KB minified, 145 KB over the wire)
   external: PLATFORM_MODULES,
   logLevel: 'info',
   banner: {

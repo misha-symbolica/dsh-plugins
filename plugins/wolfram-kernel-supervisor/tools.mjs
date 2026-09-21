@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, extname, isAbsolute, join, resolve as resolvePath } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -72,7 +72,25 @@ export function parseShowReport(text) {
       messages: Array.isArray(r.messages) ? r.messages.filter(m => typeof m === 'string') : [],
       timedOut: r.timedOut === true,
       errorImage: r.errorImage === true,
+      // Native 3D scene (kernel/Scene3D.wl): JSON in a temp file the host reads and deletes.
+      scene: typeof r.scene?.path === 'string' ? { path: r.scene.path, bytes: num(r.scene.bytes) ?? 0, elements: num(r.scene.elements) ?? 0, sceneMs: num(r.scene.sceneMs) } : null,
+      sceneUnsupported: Array.isArray(r.sceneUnsupported) ? r.sceneUnsupported.filter(m => typeof m === 'string') : [],
     }
+  } catch { return undefined }
+}
+
+/**
+ * Read and delete the scene JSON the kernel wrote for a report. Only files the kernel's own
+ * `dsh-scene-*.json` naming in the temp directory are accepted (the path comes from kernel output).
+ * @returns {Promise<Uint8Array | undefined>}
+ */
+export async function takeSceneFile(report) {
+  const path = report?.scene?.path
+  if (typeof path !== 'string' || !/\/dsh-scene-[a-z0-9]+\.json$/.test(path)) return undefined
+  try {
+    const bytes = await readFile(path)
+    unlink(path).catch(() => {})
+    return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   } catch { return undefined }
 }
 
@@ -286,7 +304,7 @@ export function createTools(deps, fallbackAgent) {
 
   tools.push(defineTool({
     name: 'wolfram_show',
-    description: 'Render a Wolfram Language expression (plot, graphic, grid, typeset formula, image, Style[…]) at retina resolution and SHOW IT TO THE USER inline in the chat. A top-level Manipulate[body, {x, 0, 1}, {c, {a, b}}, …] with simple control specs becomes an INTERACTIVE widget with native controls the user can drive (re-rendered in this kernel on release). Evaluated in this chat\'s kernel so it can use variables you defined with wolfram_eval. The image is displayed to the user directly by the GUI; you receive one line of metadata and the PNG path. Do NOT call read_image or wolfram_show again on the result — it is already visible. Graphics follow the GUI\'s light/dark appearance automatically (the kernel\'s front end is pinned to it). Set see:true only when YOU need to inspect the rendering too (costs image tokens). The user can also do this without you: /wolfram-show <expression>.',
+    description: 'Render a Wolfram Language expression (plot, graphic, grid, typeset formula, image, Style[…]) at retina resolution and SHOW IT TO THE USER inline in the chat. A top-level Manipulate[body, {x, 0, 1}, {c, {a, b}}, …] with simple control specs becomes an INTERACTIVE widget with native controls the user can drive (re-rendered in this kernel on release). Graphics3D (plots too) is shown as a NATIVE rotatable 3D scene (three.js) with the PNG as fallback; Manipulate of Graphics3D swaps geometry under the user\'s camera. Evaluated in this chat\'s kernel so it can use variables you defined with wolfram_eval. The image is displayed to the user directly by the GUI; you receive one line of metadata and the PNG path. Do NOT call read_image or wolfram_show again on the result — it is already visible. Graphics follow the GUI\'s light/dark appearance automatically (the kernel\'s front end is pinned to it). Set see:true only when YOU need to inspect the rendering too (costs image tokens). The user can also do this without you: /wolfram-show <expression>.',
     parameters: {
       expression: { type: 'string', required: true, description: 'Expression to render, e.g. Plot[Sin[x], {x, 0, 2 Pi}] or Grid[data, Frame -> All]. Multiple statements allowed; the last one is rendered.' },
       kernelId: KERNEL_ID,
@@ -298,7 +316,7 @@ export function createTools(deps, fallbackAgent) {
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_args, v) => [{ type: 'text', text: tagged(v, `displayed ${v.label || 'image'}: ${v.devicePixels.width}x${v.devicePixels.height} px = ${v.points.width}x${v.points.height} pt (@${v.scale}x; eval ${v.timing?.evalMs ?? '?'} ms, rasterize ${v.timing?.rasterMs ?? '?'} ms, total ${v.timing?.totalMs ?? '?'} ms)${v.path ? `, ${v.path}` : ''}.${v.errorImage ? ' WARNING: the rendering contains a pink error box — the expression probably did not evaluate as intended.' : ''} ${v.attachment !== null ? 'Shown to the user inline already; do not call read_image or wolfram_show on it again.' : `Not shown inline (${v.inlineUnavailable}); the PNG is on disk at the path above.`}${v.see && v.attachment !== null ? ' Image attached below for you.' : ''}${v.manipulate ? ` Interactive: ${v.manipulate.controls.map(c => `${c.name} (${c.type})`).join(', ')} — the user can drive the controls in the chat; the kernel keeps the definition while it runs.` : ''}`) }],
+      render: (_args, v) => [{ type: 'text', text: tagged(v, `displayed ${v.label || 'image'}: ${v.devicePixels.width}x${v.devicePixels.height} px = ${v.points.width}x${v.points.height} pt (@${v.scale}x; eval ${v.timing?.evalMs ?? '?'} ms, rasterize ${v.timing?.rasterMs ?? '?'} ms, total ${v.timing?.totalMs ?? '?'} ms)${v.path ? `, ${v.path}` : ''}.${v.errorImage ? ' WARNING: the rendering contains a pink error box — the expression probably did not evaluate as intended.' : ''} ${v.attachment !== null ? 'Shown to the user inline already; do not call read_image or wolfram_show on it again.' : `Not shown inline (${v.inlineUnavailable}); the PNG is on disk at the path above.`}${v.scene ? ` The user sees it as a native, rotatable 3D scene (${v.scene.elements} element${v.scene.elements === 1 ? '' : 's'}, ${Math.round(v.scene.bytes / 1024)} KB).` : ''}${v.sceneUnsupported?.length ? ` (No native 3D scene: unsupported ${v.sceneUnsupported.join(', ')}; the PNG is shown.)` : ''}${v.see && v.attachment !== null ? ' Image attached below for you.' : ''}${v.manipulate ? ` Interactive: ${v.manipulate.controls.map(c => `${c.name} (${c.type})`).join(', ')} — the user can drive the controls in the chat; the kernel keeps the definition while it runs.` : ''}`) }],
       // Card metadata the client renders; never part of the model-visible content.
       presentationMeta: (_args, v) => showPresentation(v),
     },
@@ -347,7 +365,7 @@ export function createTools(deps, fallbackAgent) {
 
 /** The presentation payload shared by the wolfram_show card meta and the /wolfram-show command result. */
 export function showPresentation(v) {
-  return { attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, sourcePath: v.sourcePath ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate, timing: v.timing ?? null, errorImage: v.errorImage === true }
+  return { attachment: v.attachment, points: v.points, devicePixels: v.devicePixels, scale: v.scale, path: v.path ?? null, sourcePath: v.sourcePath ?? null, label: v.label || null, kernelId: v.kernelId, theme: v.theme, manipulate: v.manipulate, timing: v.timing ?? null, errorImage: v.errorImage === true, scene: v.scene ?? null }
 }
 
 /**
@@ -356,7 +374,20 @@ export function showPresentation(v) {
  * @param {object} deps - same bag as createTools (sessions, storeImage, config, themeOf, trace).
  */
 export function createShowCore(deps) {
-  const { sessions, storeImage, config, trace, themeOf } = deps
+  const { sessions, storeImage, storeFile, config, trace, themeOf } = deps
+
+  /**
+   * Store the native 3D scene a report points at as a verbatim file attachment.
+   * @returns {Promise<{ attachment: object, bytes: number, elements: number, sceneMs: number | null } | undefined>}
+   */
+  async function storeScene(report, name) {
+    if (report?.scene === null || report?.scene === undefined || storeFile === undefined) return undefined
+    const bytes = await takeSceneFile(report)
+    if (bytes === undefined) return undefined
+    const stored = await storeFile(bytes, name)
+    if (stored.ref === undefined) { trace({ event: 'scene-store-failed', reason: stored.reason }); return undefined }
+    return { attachment: { attachmentId: String(stored.ref.attachmentId), name: stored.ref.name, bytes: stored.ref.bytes }, bytes: bytes.byteLength, elements: report.scene.elements, sceneMs: report.scene.sceneMs ?? null }
+  }
   const showDir = () => config.showDirectory.replace(/^~(?=\/|$)/, homedir())
 
   async function writeShowFile(bytes, scale) {
@@ -401,13 +432,16 @@ export function createShowCore(deps) {
     // The source next to the PNG (same stem, .wl): what was sent to be rasterized, with a header comment.
     const sourcePath = path !== undefined ? await writeSourceFile(path, args.expression, kernel.id, agent) : undefined
     const stored = await storeImage(image.data, path !== undefined ? basename(path) : 'wolfram-show.png')
-    trace({ event: 'show', kernelId: kernel.id, px: size, pt: points, path: path ?? null, manipulate: manipulate?.id ?? null, timing })
+    // Graphics3D also arrives as a native scene (kernel/Scene3D.wl) the GUI renders with three.js.
+    const scene = await storeScene(report, (path !== undefined ? basename(path).replace(/(@[\d.]+x)?\.png$/, '') : 'wolfram-show') + '.scene.json')
+    trace({ event: 'show', kernelId: kernel.id, px: size, pt: points, path: path ?? null, manipulate: manipulate?.id ?? null, timing, scene: scene ? { bytes: scene.bytes, elements: scene.elements } : null, sceneUnsupported: report?.sceneUnsupported ?? [] })
     return {
       kernelId: kernel.id, opened, startupMs: kernel.startupMs,
       attachment: stored.ref !== undefined ? cleanRef(stored.ref) : null,
       devicePixels: size, points, scale, resolution, bytes: image.data.byteLength,
       see: args.see === true, label: args.label ?? '', theme: themeOf(kernel),
       manipulate: manipulate ?? null,
+      scene: scene ?? null, sceneUnsupported: report?.sceneUnsupported ?? [],
       timing, errorImage: report?.errorImage === true, messages: report?.messages ?? [],
       ...(path !== undefined ? { path } : {}),
       ...(sourcePath !== undefined ? { sourcePath } : {}),
