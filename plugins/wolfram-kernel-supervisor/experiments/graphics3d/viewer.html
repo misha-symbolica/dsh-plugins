@@ -1,0 +1,446 @@
+<!doctype html>
+<!-- EXPERIMENT: three.js viewer for the "dsh-graphics3d/0" scenes Scene3D.wl emits.
+     Open as  viewer.html?scene=plot3d  (served over HTTP; loads ./scenes/<name>.json).
+     Coordinates stay in Wolfram's z-up convention: the camera's up vector is ViewVertical. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Graphics3D scene viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; font: 12px -apple-system, Helvetica, sans-serif; }
+  #view { position: relative; width: 480px; height: 360px; }
+  #view canvas { display: block; }
+  .label { color: #222; font-size: 11px; white-space: nowrap; pointer-events: none; }
+  .tick { color: #222; font-size: 10px; white-space: nowrap; pointer-events: none; }
+  #info { position: fixed; left: 8px; bottom: 8px; color: #555; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="view"></div>
+<div id="info"></div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+// Mathematica shades in gamma space (no linear workflow): disable three's colour management so the
+// documented light colours and material colours combine the way the front end combines them.
+THREE.ColorManagement.enabled = false;
+
+const params = new URLSearchParams(location.search);
+const name = params.get('scene') || 'shapes';
+const scene = await (await fetch(`./scenes/${name}.json`)).json();
+window.__scene = scene;
+
+// ---------- geometry of the bounding box ----------
+const range = scene.range;                                   // [[xmin,xmax],[ymin,ymax],[zmin,zmax]]
+const extent = range.map(([a, b]) => Math.max(b - a, 1e-12));
+const center = range.map(([a, b]) => (a + b) / 2);
+// Mathematica scales the box to BoxRatios (Automatic = true proportions) with the longest side = 1.
+const ratios = scene.boxRatios || extent;
+const maxRatio = Math.max(...ratios);
+const boxScale = extent.map((e, i) => (ratios[i] / maxRatio) / e);   // scene units -> normalized box units
+const half = ratios.map(r => (r / maxRatio) / 2);                    // half sides of the normalized box
+const boxLongest = Math.max(...extent);                              // for "scaled" sizes in scene units
+
+const root = new THREE.Group();
+root.scale.set(boxScale[0], boxScale[1], boxScale[2]);
+root.position.set(-center[0] * boxScale[0], -center[1] * boxScale[1], -center[2] * boxScale[2]);
+
+const three = new THREE.Scene();
+three.add(root);
+window.__three = three; window.__THREE = THREE;   // debugging hooks
+const NOSPEC = params.has('nospec');
+if (scene.background) three.background = new THREE.Color(...scene.background);
+
+// ---------- style helpers ----------
+const col = c => new THREE.Color(c[0], c[1], c[2]);
+function surfaceMaterial(style, opts = {}) {
+  const m = new THREE.MeshPhongMaterial({
+    color: col(style.color || [1, 1, 1]),
+    side: THREE.DoubleSide,
+    transparent: (style.opacity ?? 1) < 1,
+    opacity: style.opacity ?? 1,
+    flatShading: !!opts.flat,
+    vertexColors: !!opts.vertexColors,
+    // three's Blinn-Phong lobe is normalized by (n/2+1)/pi and lights carry the pi (see LIGHT below);
+    // Mathematica's specular term is a plain S*cos^n, so divide the specular colour by (n/2+1).
+    // Mathematica's exponent is classic Phong (reflection vector); Blinn's half-vector lobe needs ~4x.
+    // The extra 0.35 is empirical (Plot3D's Specularity[White, 3] barely shows in the front end); TODO calibrate
+    // against Rasterize pixel values.
+    specular: style.specular && !NOSPEC ? col(style.specular.color).multiplyScalar(0.35 / (2 * style.specular.exponent + 1)) : new THREE.Color(0, 0, 0),
+    shininess: style.specular ? 4 * style.specular.exponent : 30,
+    emissive: style.glow ? col(style.glow) : new THREE.Color(0, 0, 0),
+    polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,   // mesh lines sit on the surface
+  });
+  if (opts.vertexColors) m.color.set(1, 1, 1);
+  return m;
+}
+function lineMaterial(style) {
+  return new THREE.LineBasicMaterial({ color: col(style.color || [0, 0, 0]), transparent: (style.opacity ?? 1) < 1, opacity: style.opacity ?? 1 });
+}
+function scaledLength(spec, fallback) {          // "scaled" sizes are fractions of the box's longest side
+  if (!spec) return fallback;
+  if (spec.scaled != null) return spec.scaled * boxLongest;
+  if (spec.absolute != null) return spec.absolute / 72 * boxLongest / 5;   // ~points -> scene units, crude
+  return fallback;
+}
+
+// ---------- element builders (scene coordinates) ----------
+const v3 = p => new THREE.Vector3(p[0], p[1], p[2]);
+const matFor = (style, opts) => surfaceMaterial(style, opts);
+
+function alignedGeometry(geometry, p1, p2) {
+  // geometry is built along +Y from -h/2..h/2 (three.js cylinders); orient it from p1 to p2
+  const a = v3(p1), b = v3(p2), dir = b.clone().sub(a), len = dir.length();
+  const mesh = new THREE.Mesh(geometry);
+  mesh.position.copy(a.clone().add(b).multiplyScalar(0.5));
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+  return { mesh, len };
+}
+
+function buildSphere(e) {
+  const g = new THREE.Group();
+  const geo = new THREE.SphereGeometry(e.radius, 32, 16);
+  const mat = matFor(e.style);
+  for (const c of e.centers) { const m = new THREE.Mesh(geo, mat); m.position.set(...c); g.add(m); }
+  return g;
+}
+function buildCylinderLike(e, cone) {
+  const g = new THREE.Group();
+  const mat = matFor(e.style);
+  for (const [p1, p2] of e.segments) {
+    const len = v3(p2).sub(v3(p1)).length();
+    const geo = cone ? new THREE.ConeGeometry(e.radius, len, 32) : new THREE.CylinderGeometry(e.radius, e.radius, len, 32);
+    const { mesh } = alignedGeometry(geo, p1, p2);
+    mesh.material = mat;
+    g.add(mesh);
+    if (e.style.edge && !cone) { /* Mathematica draws no edges on cylinders */ }
+  }
+  return g;
+}
+function buildCuboid(e) {
+  const size = e.max.map((x, i) => x - e.min[i]);
+  const geo = new THREE.BoxGeometry(...size);
+  const m = new THREE.Mesh(geo, matFor(e.style, { flat: true }));
+  m.position.set(...e.min.map((x, i) => x + size[i] / 2));
+  const g = new THREE.Group(); g.add(m);
+  if (e.style.edge) g.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), lineMaterial(e.style.edge)).translateX(m.position.x).translateY(m.position.y).translateZ(m.position.z));
+  return g;
+}
+function resolvePaths(e, complex) {
+  if (e.idx && complex) return e.paths.map(p => p.map(i => complex.coords[i]));
+  return e.paths;
+}
+function buildTube(e, complex, radiusOverride) {
+  const g = new THREE.Group();
+  const radius = radiusOverride ?? e.radius ?? scaledLength(e.style.thickness, 0.002 * boxLongest) * 2;
+  const mat = matFor(e.style);
+  for (const path of resolvePaths(e, complex)) {
+    if (path.length < 2) continue;
+    const curve = new THREE.CurvePath();
+    for (let i = 0; i + 1 < path.length; i++) curve.add(new THREE.LineCurve3(v3(path[i]), v3(path[i + 1])));
+    const geo = new THREE.TubeGeometry(curve, Math.max(8, (path.length - 1) * 4), radius, 16, false);
+    g.add(new THREE.Mesh(geo, mat));
+    // round caps
+    const cap = new THREE.SphereGeometry(radius, 16, 8);
+    for (const p of [path[0], path[path.length - 1]]) { const s = new THREE.Mesh(cap, mat); s.position.set(...p); g.add(s); }
+  }
+  return g;
+}
+function triangulate(faces) {              // fan triangulation of (assumed convex/planar) polygons
+  const out = [];
+  for (const f of faces) for (let i = 1; i + 1 < f.length; i++) out.push(f[0], f[i], f[i + 1]);
+  return out;
+}
+function meshGeometry(coords, faces, normals, colors) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(coords.flat(), 3));
+  geo.setIndex(triangulate(faces));
+  if (normals) geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals.flat(), 3));
+  else geo.computeVertexNormals();
+  if (colors) geo.setAttribute('color', new THREE.Float32BufferAttribute(colors.flat(), 3));
+  return geo;
+}
+function faceEdges(coords, faces, style) {
+  const pts = [];
+  for (const f of faces) for (let i = 0; i < f.length; i++) { pts.push(...coords[f[i]], ...coords[f[(i + 1) % f.length]]); }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  return new THREE.LineSegments(geo, lineMaterial(style));
+}
+function buildMesh(e, complex) {
+  const coords = e.idx ? complex.coords : e.coords;
+  const colors = e.vertexColors || (e.idx ? complex.vertexColors : null);
+  const normals = e.idx ? complex.vertexNormals : null;
+  const flat = !e.idx;                       // free-standing polygons are flat; complexes are smooth
+  const geo = meshGeometry(coords, e.faces, normals, colors);
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(geo, matFor(e.style, { flat, vertexColors: !!colors })));
+  if (e.style.edge && !e.idx) g.add(faceEdges(coords, e.faces, e.style.edge));
+  return g;
+}
+function buildPolyhedron(e) {
+  // Each face gets its own vertices so shading is flat per face (Mathematica look).
+  const coords = [], faces = [];
+  for (const f of e.faces) { const base = coords.length; for (const i of f) coords.push(e.coords[i]); faces.push(f.map((_, k) => base + k)); }
+  const geo = meshGeometry(coords, faces);
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(geo, matFor(e.style, { flat: true })));
+  if (e.style.edge !== null) g.add(faceEdges(e.coords, e.faces, e.style.edge || { color: [0, 0, 0] }));
+  return g;
+}
+function buildLine(e, complex) {
+  const g = new THREE.Group();
+  const colors = e.idx ? complex?.vertexColors : null;
+  for (const path of resolvePaths(e, complex)) {
+    const geo = new THREE.BufferGeometry().setFromPoints(path.map(v3));
+    const mat = lineMaterial(e.style);
+    if (e.style.dashing) { /* TODO: LineDashedMaterial needs computeLineDistances + scale-aware sizes */ }
+    g.add(new THREE.Line(geo, mat));
+  }
+  return g;
+}
+function buildPoint(e, complex) {
+  const coords = e.idx ? e.idx.map(i => complex.coords[i]) : e.coords;
+  const geo = new THREE.BufferGeometry().setFromPoints(coords.map(v3));
+  // Point sizes: "scaled" = fraction of the image width (pixels, no attenuation).
+  const px = e.style.pointSize?.scaled != null ? e.style.pointSize.scaled * width : (e.style.pointSize?.absolute ?? 4);
+  const mat = new THREE.PointsMaterial({ color: col(e.style.color || [0, 0, 0]), size: px, sizeAttenuation: false, map: discTexture(), alphaTest: 0.5, transparent: true });
+  return new THREE.Points(geo, mat);
+}
+let _disc;
+function discTexture() {            // round points, like the front end draws them
+  if (_disc) return _disc;
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(32, 32, 30, 0, 2 * Math.PI); ctx.fill();
+  _disc = new THREE.CanvasTexture(c); return _disc;
+}
+function buildArrow(e, complex) {
+  const g = new THREE.Group();
+  const paths = resolvePaths(e, complex);
+  const headLen = (e.style.arrowheads ?? 0.04) * boxLongest;
+  for (const path of paths) {
+    if (headLen <= 0) { g.add(e.tube ? buildTube({ ...e, paths: [path], idx: false }, null, e.radius ?? undefined) : buildLine({ ...e, paths: [path], idx: false }, null)); continue; }
+    const shaftEl = { ...e, paths: [path], idx: false };
+    if (e.tube) g.add(buildTube(shaftEl, null, e.radius ?? undefined)); else g.add(buildLine(shaftEl, null));
+    const tip = v3(path[path.length - 1]), prev = v3(path[path.length - 2]);
+    const dir = tip.clone().sub(prev).normalize();
+    const base = tip.clone().sub(dir.clone().multiplyScalar(headLen));
+    const r = e.radius != null ? e.radius * 2.5 : headLen * 0.3;
+    const { mesh } = alignedGeometry(new THREE.ConeGeometry(r, headLen, 24), base.toArray(), tip.toArray());
+    mesh.material = matFor({ ...e.style, color: e.style.color || [0, 0, 0] });
+    g.add(mesh);
+  }
+  return g;
+}
+function buildText(e, complex) {
+  const div = document.createElement('div');
+  div.className = 'label';
+  div.textContent = e.text;
+  if (e.style.color) div.style.color = col(e.style.color).getStyle();
+  const label = new CSS2DObject(div);
+  label.position.set(...e.position);
+  // Text offset {ox,oy} in [-1,1]: which point of the text sits at the position.
+  const [ox, oy] = e.offset || [0, 0];
+  div.style.transform = `translate(${-50 - 50 * ox}%, ${-50 + 50 * oy}%)`;
+  label.center.set(0, 0);
+  return label;
+}
+function buildGroup(e, complex) {
+  const g = new THREE.Group();
+  const m = e.matrix.m, t = e.matrix.t;
+  g.matrix.set(m[0][0], m[0][1], m[0][2], t[0], m[1][0], m[1][1], m[1][2], t[1], m[2][0], m[2][1], m[2][2], t[2], 0, 0, 0, 1);
+  g.matrixAutoUpdate = false;
+  for (const c of e.children) { const o = build(c, complex); if (o) g.add(o); }
+  return g;
+}
+function buildComplex(e) {
+  const g = new THREE.Group();
+  for (const c of e.children) { const o = build(c, e); if (o) g.add(o); }
+  return g;
+}
+function build(e, complex) {
+  switch (e.type) {
+    case 'sphere': return buildSphere(e);
+    case 'cylinder': return buildCylinderLike(e, false);
+    case 'cone': return buildCylinderLike(e, true);
+    case 'cuboid': return buildCuboid(e);
+    case 'tube': return buildTube(e, complex);
+    case 'polyhedron': return buildPolyhedron(e);
+    case 'mesh': return buildMesh(e, complex);
+    case 'line': return buildLine(e, complex);
+    case 'point': return buildPoint(e, complex);
+    case 'arrow': return buildArrow(e, complex);
+    case 'text': return buildText(e, complex);
+    case 'group': return buildGroup(e, complex);
+    case 'complex': return buildComplex(e);
+    default: console.warn('unknown element', e.type); return null;
+  }
+}
+
+// ---------- renderer & camera ----------
+const view = document.getElementById('view');
+const width = scene.imageSize?.[0] || 480, height = scene.imageSize?.[1] || Math.round(width * 0.75);
+view.style.width = width + 'px'; view.style.height = height + 'px';
+const renderer = new THREE.WebGLRenderer({ antialias: true, <remote>: true, preserveDrawingBuffer: true });
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(width, height);
+view.appendChild(renderer.domElement);
+const labels = new CSS2DRenderer();
+labels.setSize(width, height);
+labels.domElement.style.position = 'absolute'; labels.domElement.style.top = '0'; labels.domElement.style.pointerEvents = 'none';
+view.appendChild(labels.domElement);
+
+for (const e of scene.elements) { const o = build(e, null); if (o) root.add(o); }
+
+// bounding box + axes in normalized box space
+const boxGroup = new THREE.Group();
+three.add(boxGroup);
+const corners = [];
+for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) corners.push(new THREE.Vector3(sx * half[0], sy * half[1], sz * half[2]));
+if (scene.boxed) {
+  const boxGeo = new THREE.BoxGeometry(2 * half[0], 2 * half[1], 2 * half[2]);
+  boxGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), new THREE.LineBasicMaterial({ color: 0x444444 })));
+}
+
+// Camera: ViewPoint is in the normalized box coordinates (longest side 1, centred at the origin).
+const vp = new THREE.Vector3(...scene.view.point);
+const up = new THREE.Vector3(...scene.view.vertical).normalize();
+const camera = new THREE.PerspectiveCamera(35, width / height, 0.01, 100);
+camera.up.copy(up);
+camera.position.copy(vp);
+camera.lookAt(0, 0, 0);
+// ViewAngle Automatic: fit the box corners into the frustum
+function fitFov() {
+  camera.updateMatrixWorld();
+  const inv = camera.matrixWorldInverse;
+  let need = 0;
+  for (const c of corners) {
+    const p = c.clone().applyMatrix4(inv);      // camera space: z negative toward the scene
+    const d = -p.z; if (d <= 0) continue;
+    need = Math.max(need, Math.atan(Math.abs(p.y) / d), Math.atan(Math.abs(p.x) / d / camera.aspect));
+  }
+  camera.fov = scene.view.angle ? THREE.MathUtils.radToDeg(scene.view.angle) : THREE.MathUtils.radToDeg(2 * need) * 1.02;
+  camera.updateProjectionMatrix();
+}
+fitFov();
+
+// Lights. Positions come in three flavours (DirectionalLight docs): scene coordinates, Scaled (fractions
+// of the plot range) and ImageScaled — fractions of the DISPLAYED bounding box, x right, y up, z from
+// 0 (back) to 1 (front), fixed to the camera — so ImageScaled lights are re-placed every frame. A lone
+// position shines toward the centre of the bounding box (the origin here).
+// three >= r155 divides Lambert irradiance by pi (physical units); Mathematica simply sums
+// light colours times cos(theta), so every light gets intensity pi to reproduce its shading.
+const LIGHT = Math.PI;
+const lights = [];
+function sceneToWorld(p) { return v3(p).applyMatrix4(root.matrixWorld); }
+function scaledToWorld(s) { return sceneToWorld(s.map((f, i) => range[i][0] + f * extent[i])); }
+function imageScaledToWorld(v, fromFront) {
+  camera.updateMatrixWorld();
+  const inv = camera.matrixWorldInverse;
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity), max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  for (const c of corners) { const p = c.clone().applyMatrix4(inv); min.min(p); max.max(p); }
+  // camera space looks down -z: the back of the box is min.z, the front max.z. Measured (2026-09-21): a
+  // DIRECTIONAL light's z runs 0=back..1=front as documented, but a POINT light's z=0 already sits at the
+  // front face (z=-5 is pitch black, z=0..20 all lit) — so point/spot lights count depth from the front.
+  const z0 = fromFront ? max.z : min.z;
+  const p = new THREE.Vector3(min.x + v[0] * (max.x - min.x), min.y + v[1] * (max.y - min.y), z0 + v[2] * (max.z - min.z));
+  return p.applyMatrix4(camera.matrixWorld);
+}
+function lightPoint(spec, fromFront = false) {
+  if (!spec) return new THREE.Vector3(0, 0, 0);
+  if (spec.imageScaled) return imageScaledToWorld(spec.imageScaled, fromFront);
+  if (spec.scaled) return scaledToWorld(spec.scaled);
+  return sceneToWorld(spec.scene);
+}
+root.updateMatrixWorld(true);
+for (const l of scene.lighting) {
+  if (l.type === 'ambient') { three.add(new THREE.AmbientLight(col(l.color), LIGHT)); continue; }
+  if (l.type === 'directional') {
+    const light = new THREE.DirectionalLight(col(l.color), LIGHT);
+    three.add(light); three.add(light.target);
+    lights.push({ light, l });
+  } else if (l.type === 'point') {
+    const light = new THREE.PointLight(col(l.color), LIGHT, 0, 0);   // Mathematica point lights don't attenuate by default
+    three.add(light); lights.push({ light, l });
+  } else if (l.type === 'spot') {
+    const light = new THREE.SpotLight(col(l.color), LIGHT, 0, l.angle ?? Math.PI / 6, 0, 0);
+    three.add(light); three.add(light.target); lights.push({ light, l });
+  }
+}
+function updateLights() {
+  for (const { light, l } of lights) {
+    const from = lightPoint(l.from, !light.isDirectionalLight);
+    if (light.isDirectionalLight || light.isSpotLight) {
+      const to = l.to ? lightPoint(l.to) : new THREE.Vector3(0, 0, 0);
+      // a directional light only needs its direction: place it far along from->to, aimed at `to`
+      const dir = from.clone().sub(to).normalize();
+      light.position.copy(to.clone().add(dir.multiplyScalar(light.isDirectionalLight ? 10 : from.distanceTo(to))));
+      light.target.position.copy(to);
+    } else light.position.copy(from);
+  }
+}
+
+// Axes + ticks on the box edges that are outermost on screen (Mathematica's AxesEdge -> Automatic feel)
+const tickGroup = new THREE.Group(); three.add(tickGroup);
+function drawAxes() {
+  tickGroup.clear();
+  if (!scene.ticks) return;
+  camera.updateMatrixWorld();
+  const project = v => v.clone().project(camera);
+  const c0 = project(new THREE.Vector3(0, 0, 0));
+  for (let axis = 0; axis < 3; axis++) {
+    if (!scene.axes[axis]) continue;
+    const others = [0, 1, 2].filter(a => a !== axis);
+    // candidate edges: the other two coordinates at ±half; pick the one whose midpoint projects farthest from the box centre
+    let best = null, bestD = -1;
+    for (const s1 of [-1, 1]) for (const s2 of [-1, 1]) {
+      const mid = new THREE.Vector3(); mid.setComponent(others[0], s1 * half[others[0]]); mid.setComponent(others[1], s2 * half[others[1]]);
+      const p = project(mid), d = Math.hypot(p.x - c0.x, p.y - c0.y);
+      if (d > bestD) { bestD = d; best = { s1, s2, mid }; }
+    }
+    const tick = scene.ticks[axis];
+    const toBox = v => (v - center[axis]) * boxScale[axis];
+    const outward = best.mid.clone().normalize();
+    const majorLen = 0.02, minorLen = 0.01;
+    const pts = [];
+    for (const t of tick.major) {
+      const a = best.mid.clone(); a.setComponent(axis, toBox(t.pos));
+      pts.push(a, a.clone().add(outward.clone().multiplyScalar(majorLen)));
+      const div = document.createElement('div'); div.className = 'tick'; div.textContent = t.label;
+      const lab = new CSS2DObject(div); lab.position.copy(a.clone().add(outward.clone().multiplyScalar(0.06))); tickGroup.add(lab);
+    }
+    for (const m of tick.minor) { const a = best.mid.clone(); a.setComponent(axis, toBox(m)); pts.push(a, a.clone().add(outward.clone().multiplyScalar(minorLen))); }
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    tickGroup.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x222222 })));
+    if (scene.axesLabel?.[axis]) {
+      const div = document.createElement('div'); div.className = 'label'; div.textContent = scene.axesLabel[axis];
+      const lab = new CSS2DObject(div); lab.position.copy(best.mid.clone().add(outward.clone().multiplyScalar(0.14))); tickGroup.add(lab);
+    }
+  }
+}
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = false;
+controls.addEventListener('change', drawAxes);
+drawAxes();
+
+function render() {
+  updateLights();
+  renderer.render(three, camera);
+  labels.render(three, camera);
+}
+renderer.setAnimationLoop(render);
+document.getElementById('info').textContent = `${name}: ${scene.elements.length} elements` + (scene.unsupported?.length ? ` · unsupported: ${scene.unsupported.join(', ')}` : '');
+window.__ready = true;
+</script>
+</body>
+</html>
