@@ -61,6 +61,7 @@ import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conv
 import { DisclosureRow, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CSSProperties, ReactNode } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 type Props = PropsRuntime<'tool.call.toolview'>
 type Block = Props['block']
@@ -264,6 +265,7 @@ function ShowCaption({ label, path }: { label: string, path: string | undefined 
 function WolframImage({ source, image, pointWidth, alt, path }: { source: { url: string } | { loadImage: LoadImage }, image: ImageRef, pointWidth: number | undefined, alt: string, path: string | undefined }) {
   const { url, failed } = useImageUrl(source, image)
   const [broken, setBroken] = useState(false)
+  const [zoomed, setZoomed] = useState(false)
   const frame = useFrameColor()
   const width = pointWidth ?? image.width
   if (failed || broken) return <div style={{ opacity: 0.7, fontSize: 12 }}>[image unavailable{path ? `: ${path}` : ''}]</div>
@@ -275,12 +277,50 @@ function WolframImage({ source, image, pointWidth, alt, path }: { source: { url:
         alt={alt}
         width={width}
         style={{ display: 'block', width, maxWidth: '100%', height: 'auto', cursor: 'zoom-in' }}
-        onClick={() => { window.open(url, '_blank', 'noopener') }}
+        onClick={() => setZoomed(true)}
         onError={() => setBroken(true)}
         onLoad={frame.onLoad}
         title={path ?? alt}
       />
+      {zoomed && <Lightbox url={url} alt={alt} path={path} onClose={() => setZoomed(false)} />}
     </div>
+  )
+}
+
+/**
+ * Full-size view of a shown image, in the page. Until 2026-09-22 the click did
+ * `window.open(url, '_blank')`: fine in a browser tab, but the Dock app's
+ * WKWebView wrapper loaded that URL into its ONLY window (the GUI vanished, the
+ * red button then closed the app). An overlay is the same everywhere and keeps
+ * the conversation underneath. Escape / click outside / the × close it; a click
+ * on the image toggles fit ↔ 1:1 pixels.
+ */
+function Lightbox({ url, alt, path, onClose }: { url: string, alt: string, path: string | undefined, onClose: () => void }) {
+  const [actual, setActual] = useState(false)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
+  return createPortal(
+    <div
+      role="dialog"
+      aria-label={alt}
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,0.82)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', cursor: 'zoom-out' }}
+    >
+      <img
+        src={url}
+        alt={alt}
+        onClick={(e) => { e.stopPropagation(); setActual(a => !a) }}
+        style={actual
+          ? { display: 'block', maxWidth: 'none', cursor: 'zoom-out' }
+          : { display: 'block', maxWidth: 'calc(100vw - 48px)', maxHeight: 'calc(100vh - 72px)', width: 'auto', height: 'auto', cursor: 'zoom-in' }}
+      />
+      <div style={{ position: 'fixed', left: 16, bottom: 12, fontSize: 12, color: 'rgba(255,255,255,0.7)', fontFamily: 'var(--dsh-font-mono, ui-monospace, monospace)' }}>{path ?? alt}</div>
+      <button type="button" aria-label="Close" onClick={onClose} style={{ position: 'fixed', top: 12, right: 16, fontSize: 22, lineHeight: 1, color: 'rgba(255,255,255,0.85)', background: 'transparent', border: 0, cursor: 'pointer' }}>×</button>
+    </div>,
+    document.body,
   )
 }
 
