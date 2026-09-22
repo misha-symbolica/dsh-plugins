@@ -1,5 +1,9 @@
 # tali-dash-plugins
 
+<p align="center">
+  <img src="assets/logo.svg" alt="tali-dash-plugins logo — a bucket hat and glasses" width="360">
+</p>
+
 Tali's plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH),
 one directory per plugin under `plugins/`, plus Tali's DSH fork as the git
 submodule `deepseek-harness/`. Clone with `--recurse-submodules`. See
